@@ -1,0 +1,16 @@
+services:
+  qdrant:
+    image: qdrant/qdrant:latest
+    ports:
+      - "6333:6333"
+      - "6334:6334"
+    volumes:
+      - ./qdrant_data:/qdrant/storage
+
+  nginx:
+    image: nginx:alpine
+    ports:
+      - "8080:80"
+    volumes:
+      - ./pdfs:/usr/share/nginx/html/pdfs:ro
+      - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro
