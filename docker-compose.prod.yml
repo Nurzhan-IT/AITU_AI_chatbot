@@ -1,0 +1,29 @@
+services:
+  qdrant:
+    image: qdrant/qdrant:latest
+    restart: always
+    expose:
+      - "6333"
+      - "6334"
+    volumes:
+      - ./qdrant_data:/qdrant/storage
+
+  nginx:
+    image: nginx:alpine
+    restart: always
+    ports:
+      - "8080:80"
+    volumes:
+      - ./pdfs:/usr/share/nginx/html/pdfs:ro
+      - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro
+
+  bot:
+    build: .
+    restart: always
+    env_file: .env
+    environment:
+      QDRANT_HOST: qdrant
+    volumes:
+      - ./pdfs:/app/pdfs
+    depends_on:
+      - qdrant
