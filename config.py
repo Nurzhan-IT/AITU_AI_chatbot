@@ -24,8 +24,8 @@ class Settings(BaseSettings):
     pdf_base_url: str = "http://localhost:8080/pdfs"
 
     # RAG parameters
-    chunk_size: int = 600
-    chunk_overlap: int = 100
+    chunk_size: int = 400
+    chunk_overlap: int = 80
     top_k: int = Field(default=5, ge=1, le=20)
 
 
