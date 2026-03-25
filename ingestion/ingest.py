@@ -3,6 +3,7 @@ import asyncio
 import logging
 import uuid
 from pathlib import Path
+from urllib.parse import quote
 
 import pymupdf4llm
 import tiktoken
@@ -95,7 +96,7 @@ async def ingest_pdf(filepath: str | Path, title: str) -> int:
     """Ingest a PDF into Qdrant. Returns the number of chunks upserted."""
     path = Path(filepath)
     filename = path.name
-    url = f"{settings.pdf_base_url.rstrip('/')}/{filename}"
+    url = f"{settings.pdf_base_url.rstrip('/')}/{quote(filename)}"
 
     logger.info("Parsing '%s'...", filename)
     text, page_offsets = parse_pdf(path)

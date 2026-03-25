@@ -1,8 +1,9 @@
 import logging
+from urllib.parse import quote, urlsplit, urlunsplit
 
 from aiogram import F, Router
 from aiogram.filters import Command
-from aiogram.types import Message
+from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, Message
 
 from rag.generator import Generator
 from rag.retriever import Retriever
@@ -14,10 +15,10 @@ _retriever = Retriever()
 _generator = Generator()
 
 _START_TEXT = (
-    "👋 <b>Привет! Я университетский консультант-ассистент.</b>\n\n"
+    "👋 Привет! Я университетский консультант-ассистент.\n\n"
     "Я отвечаю на вопросы на основе официальных документов университета "
     "(уставы, правила, приказы и др.).\n\n"
-    "<b>Примеры вопросов:</b>\n"
+    "Примеры вопросов:\n"
     "• Каковы условия перевода на другую специальность?\n"
     "• Как оформить академический отпуск?\n"
     "• Какие требования к итоговой аттестации?\n\n"
@@ -25,12 +26,12 @@ _START_TEXT = (
 )
 
 _HELP_TEXT = (
-    "ℹ️ <b>Как пользоваться ботом</b>\n\n"
+    "ℹ️ Как пользоваться ботом\n\n"
     "1. Напишите вопрос обычным текстом.\n"
     "2. Бот найдёт релевантные фрагменты в документах и сформирует ответ.\n"
     "3. В ответе будут указаны источники со ссылками на PDF.\n\n"
-    "<b>Поддерживаемые языки:</b> RU / EN / KZ\n\n"
-    "<b>Команды:</b>\n"
+    "Поддерживаемые языки: RU / EN / KZ\n\n"
+    "Команды:\n"
     "/start — приветствие\n"
     "/help — эта справка"
 )
@@ -42,12 +43,12 @@ _HELP_TEXT = (
 
 @router.message(Command("start"))
 async def cmd_start(message: Message) -> None:
-    await message.answer(_START_TEXT, parse_mode="HTML")
+    await message.answer(_START_TEXT)
 
 
 @router.message(Command("help"))
 async def cmd_help(message: Message) -> None:
-    await message.answer(_HELP_TEXT, parse_mode="HTML")
+    await message.answer(_HELP_TEXT)
 
 
 # ---------------------------------------------------------------------------
@@ -78,33 +79,46 @@ async def handle_question(message: Message) -> None:
 
     text = f"💬 {result['answer']}"
 
-    sources_block = _build_sources(result["sources"])
-    if sources_block:
-        text += f"\n\n{sources_block}"
+    sources = result["sources"]
+    if sources:
+        text += "\n\n📄 Источники:\n"
+        text += _build_sources_text(sources)
 
-    await status_msg.edit_text(text, parse_mode="HTML")
+    await status_msg.edit_text(text, reply_markup=_build_keyboard(sources))
 
 
 # ---------------------------------------------------------------------------
-# Sources formatter
+# Helpers
 # ---------------------------------------------------------------------------
 
-def _build_sources(sources: list[dict]) -> str:
-    """Format generator sources [{doc_title, url, pages}, ...] into HTML block."""
-    if not sources:
-        return ""
+def _encode_url(url: str) -> str:
+    parts = urlsplit(url)
+    encoded_path = quote(parts.path, safe="/")
+    return urlunsplit((parts.scheme, parts.netloc, encoded_path, parts.query, parts.fragment))
 
-    lines = ["📄 <b>Источники:</b>"]
+
+def _build_sources_text(sources: list[dict]) -> str:
+    lines = []
     for src in sources:
         doc_title = src.get("doc_title", "")
-        url = src.get("url", "")
         pages = src.get("pages", [])
-
         pages_str = ", ".join(str(p) for p in pages)
-        label = f"{doc_title} — стр. {pages_str}" if pages_str else doc_title
-        if url:
-            lines.append(f'• {label}  <a href="{url}">📎 открыть</a>')
-        else:
-            lines.append(f"• {label}")
-
+        lines.append(f"• {doc_title} — стр. {pages_str}" if pages_str else f"• {doc_title}")
     return "\n".join(lines)
+
+
+def _build_keyboard(sources: list[dict]) -> InlineKeyboardMarkup | None:
+    buttons = []
+    for src in sources:
+        url = src.get("url", "")
+        if not url:
+            continue
+        doc_title = src.get("doc_title", "Документ")
+        label = f"📎 {doc_title}"
+        if len(label) > 64:
+            label = label[:61] + "..."
+        buttons.append([InlineKeyboardButton(text=label, url=_encode_url(url))])
+
+    if not buttons:
+        return None
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
