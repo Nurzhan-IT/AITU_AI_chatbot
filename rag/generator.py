@@ -9,18 +9,38 @@ logger = logging.getLogger(__name__)
 
 _MODEL = "llama-3.3-70b-versatile"
 
-_SYSTEM_PROMPT = (
-    "Ты — университетский консультант-ассистент. Отвечай ТОЛЬКО на основе "
-    "предоставленного контекста из официальных документов университета.\n"
-    "Если ответа нет в контексте — честно скажи об этом.\n"
-    "Отвечай на том языке, на котором задан вопрос (RU/EN/KZ).\n"
-    "Будь точным, лаконичным и вежливым."
-)
+_SYSTEM_PROMPT = """Ты — официальный консультант-ассистент Astana IT University. \
+Твоя задача — давать точные ответы на основе ИСКЛЮЧИТЕЛЬНО предоставленного контекста \
+из нормативных документов университета.
 
-_NO_CONTEXT_PROMPT = (
-    "Контекст не предоставлен. Сообщи пользователю, что в базе документов "
-    "не найдено релевантной информации по его вопросу, и предложи переформулировать."
-)
+ОБЯЗАТЕЛЬНЫЕ ПРАВИЛА:
+
+1. ЦИТИРУЙ НОМЕР ПУНКТА. Если в контексте есть пункты вида «30.», «п.30», «п. 30–31» — \
+ВСЕГДА указывай их в ответе. Пример: «Согласно п. 30, объём составляет 50–60 страниц».
+
+2. ТОЧНЫЕ ЦИФРЫ. Если в контексте есть конкретные числа (страницы, сроки, требования) — \
+ОБЯЗАТЕЛЬНО включай их в ответ. Никогда не пиши «не указано», если цифра присутствует в контексте.
+
+3. ОФИЦИАЛЬНЫЕ ОПРЕДЕЛЕНИЯ — ПРИОРИТЕТ. Если в контексте есть раздел «Термины и сокращения» \
+или «Определения» — используй именно его формулировки, а не описательные пункты.
+
+4. ПОЛНОТА. Если вопрос о структуре/перечне — приводи ПОЛНЫЙ список, не сокращай.
+
+5. ПРИЗНАНИЕ НЕПОЛНОТЫ. Если в предоставленных фрагментах нет полного ответа — \
+скажи: «В предоставленных фрагментах информация о [X] отсутствует. Рекомендую \
+обратиться к полному документу.» Не придумывай и не обобщай.
+
+6. ЯЗЫК ОТВЕТА = язык вопроса (RU / EN / KZ).
+
+7. ФОРМАТ ОТВЕТА:
+   [Ответ с цитатами пунктов]
+
+   Основание: п. XX, [Название раздела документа]
+"""
+
+_NO_CONTEXT_PROMPT = """В базе документов не найдено релевантной информации по данному вопросу.
+Пожалуйста, переформулируйте запрос или уточните, к какому документу относится вопрос.
+Отвечай на том же языке, что и вопрос."""
 
 
 def _build_context(chunks: list[dict]) -> str:
@@ -28,10 +48,23 @@ def _build_context(chunks: list[dict]) -> str:
     for i, chunk in enumerate(chunks, 1):
         doc = chunk.get("doc_title", "Документ")
         page = chunk.get("page", 0)
+        page_end = chunk.get("page_end", page)
+        section = chunk.get("section_title", "")
+        para = chunk.get("paragraph_range", "")
         text = chunk.get("text", "").strip()
-        header = f"[{i}] {doc}, стр. {page}" if page else f"[{i}] {doc}"
-        lines.append(f"{header}:\n{text}")
-    return "\n\n".join(lines)
+
+        header_parts = [f"[{i}] {doc}"]
+        if section:
+            header_parts.append(f"Раздел: «{section}»")
+        if para:
+            header_parts.append(para)
+        if page and page_end and page != page_end:
+            header_parts.append(f"стр. {page}–{page_end}")
+        elif page:
+            header_parts.append(f"стр. {page}")
+
+        lines.append(f"{', '.join(header_parts)}:\n{text}")
+    return "\n\n---\n\n".join(lines)
 
 
 def _deduplicate_sources(chunks: list[dict]) -> list[dict]:
@@ -50,8 +83,11 @@ def _deduplicate_sources(chunks: list[dict]) -> list[dict]:
                 "url": chunk.get("url", ""),
             }
         page = chunk.get("page", 0)
+        page_end = chunk.get("page_end", page)
         if page:
             pages[filename].add(page)
+        if page_end and page_end != page:
+            pages[filename].add(page_end)
 
     sources = []
     for filename, doc in grouped.items():

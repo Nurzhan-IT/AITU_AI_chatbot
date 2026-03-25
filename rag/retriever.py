@@ -44,13 +44,17 @@ class Retriever:
             p = point.payload or {}
             filename = p.get("filename", "")
             url = f"{settings.pdf_base_url.rstrip('/')}/{filename}" if filename else ""
+            page = p.get("page", 0)
             hits.append(
                 {
                     "text": p.get("text", ""),
                     "doc_title": p.get("doc_title", ""),
                     "filename": filename,
                     "url": url,
-                    "page": p.get("page", 0),
+                    "page": page,
+                    "page_end": p.get("page_end", page),
+                    "section_title": p.get("section_title", ""),
+                    "paragraph_range": p.get("paragraph_range", ""),
                     "score": point.score,
                 }
             )

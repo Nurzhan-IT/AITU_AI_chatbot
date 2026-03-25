@@ -44,8 +44,9 @@ def parse_pdf(filepath: str | Path) -> tuple[str, dict[int, int]]:
     page_offsets: dict[int, int] = {}
     for page in pages:
         page_num: int = page.get("metadata", {}).get("page", 0) + 1  # 1-based
-        page_offsets[len(full_text)] = page_num
+        page_offsets[len(full_text)] = page_num  # начало страницы
         full_text += page.get("text", "")
+        page_offsets[len(full_text)] = page_num  # конец страницы
 
     return full_text, page_offsets
 
@@ -84,10 +85,12 @@ def _add_chunk(
     char_offset: int,
     page_offsets: dict[int, int],
 ) -> None:
+    raw_len = len(text)
     text = text.strip()
     if not text:
         return
     page = _page_for_offset(char_offset, page_offsets)
+    page_end = _page_for_offset(char_offset + raw_len, page_offsets)
     full_text = f"[{section_title}]"
     if para_range:
         full_text += f" [{para_range}]"
@@ -97,6 +100,7 @@ def _add_chunk(
         "section_title": section_title,
         "paragraph_range": para_range or "",
         "page": page,
+        "page_end": page_end,
     })
 
 
@@ -112,11 +116,13 @@ def _token_chunks_fallback(
     char_offset = 0
     for raw in raw_chunks:
         page = _page_for_offset(char_offset, page_offsets)
+        page_end = _page_for_offset(char_offset + len(raw), page_offsets)
         result.append({
             "text": raw,
             "section_title": "",
             "paragraph_range": "",
             "page": page,
+            "page_end": page_end,
         })
         char_offset += len(raw)
     return result
@@ -222,8 +228,9 @@ def chunk_by_sections(
 
 def _page_for_offset(char_offset: int, page_offsets: dict[int, int]) -> int:
     """Return the page number that contains char_offset."""
-    page = 1
-    for offset, page_num in sorted(page_offsets.items()):
+    sorted_offsets = sorted(page_offsets.items())
+    page = sorted_offsets[0][1] if sorted_offsets else 1
+    for offset, page_num in sorted_offsets:
         if char_offset >= offset:
             page = page_num
         else:
@@ -278,6 +285,7 @@ async def ingest_pdf(filepath: str | Path, title: str) -> int:
                     "filename": filename,
                     "url": url,
                     "page": chunk["page"],
+                    "page_end": chunk["page_end"],
                     "chunk_index": chunk_index,
                     "section_title": chunk["section_title"],
                     "paragraph_range": chunk["paragraph_range"],
