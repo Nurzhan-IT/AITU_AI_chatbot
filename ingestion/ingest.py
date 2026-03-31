@@ -43,7 +43,7 @@ def parse_pdf(filepath: str | Path) -> tuple[str, dict[int, int]]:
     full_text = ""
     page_offsets: dict[int, int] = {}
     for page in pages:
-        page_num: int = page.get("metadata", {}).get("page", 0) + 1  # 1-based
+        page_num: int = page.get("metadata", {}).get("page", 1)  # pymupdf4llm already 1-based
         page_offsets[len(full_text)] = page_num  # начало страницы
         full_text += page.get("text", "")
         page_offsets[len(full_text)] = page_num  # конец страницы
@@ -177,7 +177,8 @@ def chunk_by_sections(
             para_positions.append((start, para_text, para_num))
 
         # Жадно группируем пункты в чанки
-        current_paras: list[str] = []
+        # Храним (sec_relative_offset, text) чтобы знать позицию первого пункта
+        current_paras: list[tuple[int, str]] = []
         current_tokens = 0
         first_para_num: str | None = None
         last_para_num: str | None = None
@@ -191,20 +192,20 @@ def chunk_by_sections(
                 )
                 _add_chunk(
                     chunks,
-                    "\n".join(current_paras),
+                    "\n".join(t for _, t in current_paras),
                     sec_title,
                     para_range,
-                    sec_char_offset + start,
+                    sec_char_offset + current_paras[0][0],  # позиция первого пункта чанка
                     page_offsets,
                 )
                 # Overlap: оставляем последний пункт
-                overlap_para = current_paras[-1]
-                current_paras = [overlap_para, para_text]
-                current_tokens = sum(len(enc.encode(p)) for p in current_paras)
-                first_para_num = _extract_para_num(overlap_para)
+                overlap = current_paras[-1]
+                current_paras = [overlap, (start, para_text)]
+                current_tokens = sum(len(enc.encode(t)) for _, t in current_paras)
+                first_para_num = _extract_para_num(overlap[1])
                 last_para_num = para_num
             else:
-                current_paras.append(para_text)
+                current_paras.append((start, para_text))
                 current_tokens += tokens
                 if first_para_num is None:
                     first_para_num = para_num
@@ -216,10 +217,10 @@ def chunk_by_sections(
             )
             _add_chunk(
                 chunks,
-                "\n".join(current_paras),
+                "\n".join(t for _, t in current_paras),
                 sec_title,
                 para_range,
-                sec_char_offset,
+                sec_char_offset + current_paras[0][0],  # позиция первого пункта чанка
                 page_offsets,
             )
 
