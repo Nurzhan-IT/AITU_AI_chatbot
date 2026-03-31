@@ -17,6 +17,9 @@ async def on_startup(bot: Bot) -> None:
     retriever = Retriever()
     await retriever._ensure_collection()
 
+    from duplicate_detection.db import init_db
+    await init_db(settings.sqlite_db_path, settings.duplicate_detection_log)
+
     me = await bot.get_me()
     logger.info("Bot started: @%s (id=%d)", me.username, me.id)
     logger.info("Admin Telegram ID: %d", settings.admin_telegram_id)

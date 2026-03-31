@@ -19,9 +19,11 @@ logger = logging.getLogger(__name__)
 _VECTOR_SIZE = 1536
 _ENCODING = "cl100k_base"
 
-# Regex для section-aware chunking
+# Regex для section-aware chunking.
+# Поддерживает как plain ("2. Магистерская…"), так и markdown ("## 2. Магистерская…") заголовки.
+# Группа 1 захватывает только текст заголовка без символов '#'.
 _SECTION_RE = re.compile(
-    r'^(\d+\.\s+[А-ЯA-Z].+|Термины и сокращения|Общие положения)',
+    r'^(?:#{1,6}\s*)?(\d+\.\s+[А-ЯA-Z].+|Термины и сокращения|Общие положения)',
     re.MULTILINE,
 )
 _PARAGRAPH_RE = re.compile(r'(?=^\s{0,4}\d{1,3}[\.\)]\s)', re.MULTILINE)
@@ -151,7 +153,7 @@ def chunk_by_sections(
         start = match.start()
         end = section_splits[i + 1].start() if i + 1 < len(section_splits) else len(text)
         sections.append({
-            "title": match.group().strip(),
+            "title": match.group(1).strip(),
             "text": text[start:end],
             "char_offset": start,
         })

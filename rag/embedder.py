@@ -5,12 +5,12 @@ from config import settings
 
 logger = logging.getLogger(__name__)
 
-_MODEL = "openai/text-embedding-3-small"
 _OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 
 
 class Embedder:
     def __init__(self) -> None:
+        self._model = settings.embedding_model
         self._client = AsyncOpenAI(
             api_key=settings.openrouter_api_key,
             base_url=_OPENROUTER_BASE_URL,
@@ -21,7 +21,7 @@ class Embedder:
             return []
         try:
             response = await self._client.embeddings.create(
-                model=_MODEL,
+                model=self._model,
                 input=texts,
             )
             return [item.embedding for item in response.data]

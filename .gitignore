@@ -19,6 +19,9 @@ build/
 # Data
 qdrant_data/
 pdfs/
+data/
+duplicate_detection.log
+duplicate_detection.log.*
 
 # IDE
 .vscode/

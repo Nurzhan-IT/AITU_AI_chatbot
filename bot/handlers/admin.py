@@ -1,4 +1,5 @@
 import logging
+import math
 from pathlib import Path
 
 from aiogram import Bot, Router
@@ -8,11 +9,13 @@ from aiogram.types import Message
 from config import settings
 from ingestion.ingest import ingest_pdf
 from rag.retriever import Retriever
+from duplicate_detection import repository, detector
 
 logger = logging.getLogger(__name__)
 router = Router()
 
 _PDFS_DIR = Path("pdfs")
+_WARNINGS_PAGE_SIZE = 5
 
 
 # ---------------------------------------------------------------------------
@@ -75,9 +78,37 @@ async def cmd_upload(message: Message, bot: Bot) -> None:
         await status_msg.edit_text(f"❌ Ошибка при индексации: {e}")
         return
 
+    # Record upload in file history
+    await repository.record_file_event(doc.file_name, title, "uploaded", n_chunks)
+
     await status_msg.edit_text(
         f"✅ <b>{doc.file_name}</b> проиндексирован.\n"
-        f"Загружено чанков: <b>{n_chunks}</b>",
+        f"Загружено чанков: <b>{n_chunks}</b>\n"
+        f"⏳ Анализирую на дубликаты...",
+        parse_mode="HTML",
+    )
+
+    # Run duplicate/stale detection (non-critical — upload already succeeded)
+    try:
+        found = await detector.analyze_new_document(
+            filepath=dest,
+            filename=doc.file_name,
+            doc_title=title,
+            bot=bot,
+            admin_id=settings.admin_telegram_id,
+        )
+        if found:
+            suffix = f"⚠️ Найдено предупреждений: <b>{len(found)}</b>. Используйте /warnings"
+        else:
+            suffix = "✅ Дубликаты и устаревшие данные не обнаружены."
+    except Exception as e:
+        logger.error("Detection pipeline failed for '%s': %s", doc.file_name, e)
+        suffix = "⚠️ Анализ дубликатов не выполнен."
+
+    await status_msg.edit_text(
+        f"✅ <b>{doc.file_name}</b> проиндексирован.\n"
+        f"Загружено чанков: <b>{n_chunks}</b>\n"
+        f"{suffix}",
         parse_mode="HTML",
     )
 
@@ -150,8 +181,123 @@ async def cmd_delete(message: Message) -> None:
         except Exception as e:
             logger.warning("Could not remove local file '%s': %s", local_file, e)
 
+    # Record deletion in file history
+    await repository.record_file_event(filename, filename, "deleted", deleted)
+
     await message.answer(
         f"🗑️ Документ <code>{filename}</code> удалён.\n"
         f"Удалено чанков: <b>{deleted}</b>",
         parse_mode="HTML",
     )
+
+
+# ---------------------------------------------------------------------------
+# /warnings [page]
+# ---------------------------------------------------------------------------
+
+@router.message(Command("warnings"))
+async def cmd_warnings(message: Message) -> None:
+    parts = (message.text or "").split()
+    page = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 1
+    page = max(1, page)
+    offset = (page - 1) * _WARNINGS_PAGE_SIZE
+
+    rows, total = await repository.list_warnings(
+        resolved=False, limit=_WARNINGS_PAGE_SIZE, offset=offset
+    )
+
+    if total == 0:
+        await message.answer("✅ Нет активных предупреждений.")
+        return
+
+    total_pages = math.ceil(total / _WARNINGS_PAGE_SIZE)
+    start = offset + 1
+    end = min(offset + _WARNINGS_PAGE_SIZE, total)
+
+    lines = [f"📋 <b>Предупреждения ({start}–{end} из {total})</b>\n"]
+
+    for row in rows:
+        wtype = row["warning_type"]
+        badge = "🔁 DUPLICATE" if wtype == "DUPLICATE" else "📅 STALE"
+        sim = f"{row['similarity']:.0%}"
+        date = row["created_at"][:10]  # YYYY-MM-DD
+        lines.append(
+            f"[<b>#{row['id']}</b>] {badge}\n"
+            f"  Новый: <code>{row['new_filename']}</code>\n"
+            f"  Существующий: <code>{row['existing_filename']}</code>\n"
+            f"  Сходство: {sim}  |  {date}"
+        )
+        if wtype == "STALE" and row.get("llm_reason"):
+            lines.append(f"  Причина: {row['llm_reason']}")
+        lines.append("")
+
+    lines.append(f"Страница {page}/{total_pages}")
+    if page < total_pages:
+        lines.append(f"Следующая: /warnings {page + 1}")
+    lines.append("\nЗакрыть предупреждение: /resolve &lt;id&gt;")
+
+    await message.answer("\n".join(lines), parse_mode="HTML")
+
+
+# ---------------------------------------------------------------------------
+# /resolve <id>
+# ---------------------------------------------------------------------------
+
+@router.message(Command("resolve"))
+async def cmd_resolve(message: Message) -> None:
+    parts = (message.text or "").split()
+    if len(parts) < 2 or not parts[1].isdigit():
+        await message.answer(
+            "✏️ Использование: <code>/resolve 42</code>",
+            parse_mode="HTML",
+        )
+        return
+
+    warning_id = int(parts[1])
+    success = await repository.resolve_warning(warning_id)
+
+    if success:
+        await message.answer(
+            f"✅ Предупреждение <code>#{warning_id}</code> закрыто.",
+            parse_mode="HTML",
+        )
+    else:
+        await message.answer(
+            f"⚠️ Предупреждение <code>#{warning_id}</code> не найдено или уже закрыто.",
+            parse_mode="HTML",
+        )
+
+
+# ---------------------------------------------------------------------------
+# /history [filename]
+# ---------------------------------------------------------------------------
+
+@router.message(Command("history"))
+async def cmd_history(message: Message) -> None:
+    parts = (message.text or "").split(maxsplit=1)
+    filename = parts[1].strip() if len(parts) > 1 else None
+
+    rows = await repository.get_file_history(filename=filename, limit=10)
+
+    if not rows:
+        subject = f"<code>{filename}</code>" if filename else "документов"
+        await message.answer(
+            f"📭 История изменений {subject} пуста.",
+            parse_mode="HTML",
+        )
+        return
+
+    title = f"📜 <b>История: {filename}</b>" if filename else "📜 <b>Последние 10 событий</b>"
+    lines = [title, ""]
+
+    event_icon = {"uploaded": "⬆️", "deleted": "🗑️"}
+    for row in rows:
+        icon = event_icon.get(row["event"], "•")
+        date = row["timestamp"][:16].replace("T", " ")  # YYYY-MM-DD HH:MM
+        lines.append(
+            f"{icon} <b>{row['event'].upper()}</b>  {date}\n"
+            f"   <code>{row['filename']}</code>"
+            + (f"  ({row['chunk_count']} чанков)" if row["chunk_count"] else "")
+        )
+
+    await message.answer("\n".join(lines), parse_mode="HTML")

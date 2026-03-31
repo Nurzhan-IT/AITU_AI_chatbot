@@ -1,13 +1,10 @@
 import logging
 from collections import defaultdict
-
-from groq import AsyncGroq
+from typing import Any
 
 from config import settings
 
 logger = logging.getLogger(__name__)
-
-_MODEL = "llama-3.3-70b-versatile"
 
 _SYSTEM_PROMPT = """Ты — официальный консультант-ассистент Astana IT University. \
 Твоя задача — давать точные ответы на основе ИСКЛЮЧИТЕЛЬНО предоставленного контекста \
@@ -96,9 +93,23 @@ def _deduplicate_sources(chunks: list[dict]) -> list[dict]:
     return sources
 
 
+def _make_llm_client() -> Any:
+    if settings.llm_provider == "groq":
+        from groq import AsyncGroq
+        return AsyncGroq(api_key=settings.groq_api_key)
+    else:
+        from openai import AsyncOpenAI
+        return AsyncOpenAI(
+            api_key=settings.openrouter_api_key,
+            base_url="https://openrouter.ai/api/v1",
+        )
+
+
 class Generator:
     def __init__(self) -> None:
-        self._client = AsyncGroq(api_key=settings.groq_api_key)
+        self._client = _make_llm_client()
+        self._provider = settings.llm_provider
+        self._model = settings.llm_model
 
     async def generate(self, question: str, chunks: list[dict]) -> dict:
         """
@@ -133,7 +144,7 @@ class Generator:
 
         try:
             response = await self._client.chat.completions.create(
-                model=_MODEL,
+                model=self._model,
                 messages=[
                     {"role": "system", "content": system},
                     {"role": "user", "content": user_content},
@@ -142,5 +153,5 @@ class Generator:
             )
             return response.choices[0].message.content or ""
         except Exception as e:
-            logger.error("Groq API call failed: %s", e)
+            logger.error("LLM API call failed (provider=%s, model=%s): %s", self._provider, self._model, e)
             raise
