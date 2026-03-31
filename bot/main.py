@@ -1,11 +1,13 @@
 import asyncio
 import logging
+import time
+from datetime import datetime
 
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 
-from config import settings
+from config import settings, TZ_UTC5
 from bot.handlers import admin, user
 from rag.retriever import Retriever
 
@@ -31,6 +33,7 @@ async def on_shutdown(bot: Bot) -> None:
 
 
 async def main() -> None:
+    logging.Formatter.converter = lambda *args: datetime.now(TZ_UTC5).timetuple()
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(levelname)-8s %(name)s: %(message)s",

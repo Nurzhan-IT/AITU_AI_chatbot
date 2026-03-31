@@ -1,12 +1,13 @@
 import logging
 import math
+from datetime import datetime
 from pathlib import Path
 
 from aiogram import Bot, Router
 from aiogram.filters import Command
-from aiogram.types import Message
+from aiogram.types import BufferedInputFile, Message
 
-from config import settings
+from config import settings, TZ_UTC5
 from ingestion.ingest import ingest_pdf
 from rag.retriever import Retriever
 from duplicate_detection import repository, detector
@@ -301,3 +302,31 @@ async def cmd_history(message: Message) -> None:
         )
 
     await message.answer("\n".join(lines), parse_mode="HTML")
+
+
+# ---------------------------------------------------------------------------
+# /report
+# ---------------------------------------------------------------------------
+
+@router.message(Command("report"))
+async def cmd_report(message: Message) -> None:
+    """Generate and send a PDF report of all unresolved warnings."""
+    status = await message.answer("⏳ Генерирую PDF-отчёт...")
+    try:
+        from duplicate_detection.report_generator import generate_report
+        pdf_bytes = await generate_report()
+        ts = datetime.now(TZ_UTC5).strftime("%Y%m%d_%H%M")
+        filename = f"warnings_report_{ts}.pdf"
+        await message.answer_document(
+            BufferedInputFile(pdf_bytes, filename=filename),
+            caption=(
+                "📊 <b>Отчёт о предупреждениях</b>\n"
+                "Содержит все нерешённые дубликаты и устаревшие данные."
+            ),
+            parse_mode="HTML",
+        )
+    except Exception as exc:
+        logger.error("Report generation failed: %s", exc)
+        await message.answer(f"❌ Ошибка генерации отчёта: {exc}")
+    finally:
+        await status.delete()

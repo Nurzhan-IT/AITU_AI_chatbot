@@ -1,17 +1,18 @@
 """CRUD operations for file_history and warnings tables."""
 import logging
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Optional
 
 import aiosqlite
 
+from config import TZ_UTC5
 from duplicate_detection.db import _get_path
 
 logger = logging.getLogger(__name__)
 
 
 def _now_utc() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return datetime.now(TZ_UTC5).strftime("%Y-%m-%dT%H:%M:%S+05:00")
 
 
 # ---------------------------------------------------------------------------
@@ -126,3 +127,27 @@ async def resolve_warning(warning_id: int) -> bool:
         )
         await db.commit()
         return cursor.rowcount == 1
+
+
+async def get_warnings_for_report(limit: int = 1000) -> tuple[list[dict], int]:
+    """Return all unresolved warnings with full fields for PDF report generation."""
+    async with aiosqlite.connect(_get_path()) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            """
+            SELECT id, warning_type, new_filename, existing_filename,
+                   new_chunk_text, existing_chunk_text,
+                   similarity, llm_reason, resolved, created_at
+            FROM warnings
+            WHERE resolved = 0
+            ORDER BY created_at DESC
+            LIMIT ?
+            """,
+            (limit,),
+        )
+        rows = await cursor.fetchall()
+        count_cursor = await db.execute(
+            "SELECT COUNT(*) FROM warnings WHERE resolved = 0"
+        )
+        total = (await count_cursor.fetchone())[0]  # type: ignore[index]
+    return [dict(r) for r in rows], total

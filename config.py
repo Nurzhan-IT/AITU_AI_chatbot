@@ -1,6 +1,10 @@
+from datetime import timezone, timedelta
 from typing import Literal
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+# Almaty / Astana time (UTC+5, no DST)
+TZ_UTC5 = timezone(timedelta(hours=5))
 
 
 class Settings(BaseSettings):

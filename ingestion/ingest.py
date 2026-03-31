@@ -3,6 +3,7 @@ import asyncio
 import logging
 import re
 import uuid
+from datetime import datetime
 from pathlib import Path
 from urllib.parse import quote
 
@@ -11,7 +12,7 @@ import tiktoken
 from qdrant_client import AsyncQdrantClient
 from qdrant_client.models import Distance, PointStruct, VectorParams
 
-from config import settings
+from config import settings, TZ_UTC5
 from rag.embedder import Embedder
 
 logger = logging.getLogger(__name__)
@@ -349,5 +350,6 @@ async def _main() -> None:
 
 
 if __name__ == "__main__":
+    logging.Formatter.converter = lambda *args: datetime.now(TZ_UTC5).timetuple()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     asyncio.run(_main())

@@ -1,8 +1,11 @@
 import logging
 import logging.handlers
+from datetime import datetime
 from pathlib import Path
 
 import aiosqlite
+
+from config import TZ_UTC5
 
 logger = logging.getLogger(__name__)
 
@@ -34,7 +37,9 @@ def _setup_file_logger(log_path: str) -> None:
         encoding="utf-8",
     )
     handler.setLevel(logging.DEBUG)
-    handler.setFormatter(logging.Formatter(_LOG_FORMAT, datefmt=_LOG_DATEFMT))
+    fmt = logging.Formatter(_LOG_FORMAT, datefmt=_LOG_DATEFMT)
+    fmt.converter = lambda *args: datetime.now(TZ_UTC5).timetuple()
+    handler.setFormatter(fmt)
 
     dd_logger.addHandler(handler)
     dd_logger.setLevel(logging.DEBUG)
