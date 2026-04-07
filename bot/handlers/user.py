@@ -36,6 +36,24 @@ _HELP_TEXT = (
     "/help — эта справка"
 )
 
+MAX_TG_LEN = 4000
+
+
+async def send_long_message(message, text: str):
+    if len(text) <= MAX_TG_LEN:
+        await message.answer(text)
+        return
+    parts = []
+    while len(text) > MAX_TG_LEN:
+        split_at = text.rfind("\n\n", 0, MAX_TG_LEN)
+        if split_at == -1:
+            split_at = MAX_TG_LEN
+        parts.append(text[:split_at])
+        text = text[split_at:].lstrip()
+    parts.append(text)
+    for part in parts:
+        await message.answer(part)
+
 
 # ---------------------------------------------------------------------------
 # /start  /help
@@ -84,7 +102,12 @@ async def handle_question(message: Message) -> None:
         text += "\n\n📄 Источники:\n"
         text += _build_sources_text(sources)
 
-    await status_msg.edit_text(text, reply_markup=_build_keyboard(sources))
+    keyboard = _build_keyboard(sources)
+    if len(text) <= MAX_TG_LEN:
+        await status_msg.edit_text(text, reply_markup=keyboard)
+    else:
+        await status_msg.delete()
+        await send_long_message(message, text)
 
 
 # ---------------------------------------------------------------------------
