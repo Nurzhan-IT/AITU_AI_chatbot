@@ -2,37 +2,36 @@ import logging
 from collections import defaultdict
 from typing import Any
 
+from langdetect import detect
+
 from config import settings
 
 logger = logging.getLogger(__name__)
 
-_SYSTEM_PROMPT = """Ты — официальный консультант-ассистент Astana IT University. \
-Твоя задача — давать точные ответы на основе ИСКЛЮЧИТЕЛЬНО предоставленного контекста \
-из нормативных документов университета.
 
-ОБЯЗАТЕЛЬНЫЕ ПРАВИЛА:
+def detect_language(text: str) -> str:
+    try:
+        lang = detect(text)
+        return {"ru": "Russian", "en": "English", "kk": "Kazakh"}.get(lang, "Russian")
+    except Exception:
+        return "Russian"
 
-1. ЦИТИРУЙ НОМЕР ПУНКТА. Если в контексте есть пункты вида «30.», «п.30», «п. 30–31» — \
-ВСЕГДА указывай их в ответе. Пример: «Согласно п. 30, объём составляет 50–60 страниц».
+_SYSTEM_PROMPT = """You are a university consultation assistant for AITU (Astana IT University).
 
-2. ТОЧНЫЕ ЦИФРЫ. Если в контексте есть конкретные числа (страницы, сроки, требования) — \
-ОБЯЗАТЕЛЬНО включай их в ответ. Никогда не пиши «не указано», если цифра присутствует в контексте.
-
-3. ОФИЦИАЛЬНЫЕ ОПРЕДЕЛЕНИЯ — ПРИОРИТЕТ. Если в контексте есть раздел «Термины и сокращения» \
-или «Определения» — используй именно его формулировки, а не описательные пункты.
-
-4. ПОЛНОТА. Если вопрос о структуре/перечне — приводи ПОЛНЫЙ список, не сокращай.
-
-5. ПРИЗНАНИЕ НЕПОЛНОТЫ. Если в предоставленных фрагментах нет полного ответа — \
-скажи: «В предоставленных фрагментах информация о [X] отсутствует. Рекомендую \
-обратиться к полному документу.» Не придумывай и не обобщай.
-
-6. ЯЗЫК ОТВЕТА = язык вопроса (RU / EN / KZ).
-
-7. ФОРМАТ ОТВЕТА:
-   [Ответ с цитатами пунктов]
-
-   Основание: п. XX, [Название раздела документа]
+Rules:
+1. Answer ONLY based on the provided document fragments. Do not use outside knowledge.
+2. ALWAYS cite the source using the document title, section, and page number from the fragment
+   headers. For English documents use "Section X, p.Y"; for Russian documents use "п.X, стр.Y".
+3. Quote exact figures: dates, deadlines, counts, thresholds — do not paraphrase numbers.
+4. Use official terms as they appear in the documents.
+5. If the question cannot be answered from the provided fragments, say so explicitly.
+6. LANGUAGE RULE: The user message will state the detected query language. You MUST respond
+   in that exact language (Russian, English, or Kazakh), regardless of the document language.
+7. At the end of your answer, add a sources section:
+   - In Russian answers: "Источники:"
+   - In English answers: "Sources:"
+   - In Kazakh answers: "Дереккөздер:"
+   List each document title, section, and page you cited.
 """
 
 _NO_CONTEXT_PROMPT = """В базе документов не найдено релевантной информации по данному вопросу.
@@ -116,27 +115,34 @@ class Generator:
         Returns:
             {
                 "answer": str,
+                "detected_lang": str,
                 "sources": [{"doc_title": str, "filename": str, "url": str, "pages": [int, ...]}, ...]
             }
         """
+        detected_lang = detect_language(question)
+
         if not chunks:
             logger.info("generate: no chunks provided, returning no-context answer")
-            answer = await self._call_llm(question, context=None)
-            return {"answer": answer, "sources": []}
+            answer = await self._call_llm(question, context=None, detected_lang=detected_lang)
+            return {"answer": answer, "detected_lang": detected_lang, "sources": []}
 
         context = _build_context(chunks)
-        answer = await self._call_llm(question, context=context)
+        answer = await self._call_llm(question, context=context, detected_lang=detected_lang)
         sources = _deduplicate_sources(chunks)
 
         logger.info(
-            "generate: question='%.60s' → %d chunks, %d sources",
-            question, len(chunks), len(sources),
+            "generate: question='%.60s' lang=%s → %d chunks, %d sources",
+            question, detected_lang, len(chunks), len(sources),
         )
-        return {"answer": answer, "sources": sources}
+        return {"answer": answer, "detected_lang": detected_lang, "sources": sources}
 
-    async def _call_llm(self, question: str, context: str | None) -> str:
+    async def _call_llm(self, question: str, context: str | None, detected_lang: str = "Russian") -> str:
         if context:
-            user_content = f"Контекст:\n{context}\n\nВопрос: {question}"
+            user_content = (
+                f"Контекст:\n{context}\n\n"
+                f"Язык вопроса пользователя: {detected_lang}\n"
+                f"Вопрос: {question}"
+            )
             system = _SYSTEM_PROMPT
         else:
             user_content = f"Вопрос: {question}"
