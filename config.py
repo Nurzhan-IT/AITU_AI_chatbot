@@ -19,9 +19,8 @@ class Settings(BaseSettings):
     llm_model: str = "llama-3.3-70b-versatile"
     groq_api_key: str = ""
 
-    # Embeddings (provider is always OpenRouter)
-    openrouter_api_key: str
-    embedding_model: str = "openai/text-embedding-3-small"
+    # OpenRouter (used only when llm_provider == "openrouter")
+    openrouter_api_key: str = ""
 
     # Qdrant
     qdrant_host: str = "localhost"

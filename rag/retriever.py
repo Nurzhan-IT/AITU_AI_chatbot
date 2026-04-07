@@ -8,7 +8,7 @@ from rag.embedder import Embedder
 
 logger = logging.getLogger(__name__)
 
-_VECTOR_SIZE = 1536
+_VECTOR_SIZE = 1024
 
 
 class Retriever:
@@ -31,7 +31,7 @@ class Retriever:
     async def search(self, query: str) -> list[dict]:
         await self._ensure_collection()
 
-        vector = await self._embedder.embed_one(query)
+        vector = await self._embedder.embed_query(query)
         results = await self._client.search(
             collection_name=settings.qdrant_collection,
             query_vector=vector,

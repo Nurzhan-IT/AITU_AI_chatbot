@@ -17,7 +17,7 @@ from rag.embedder import Embedder
 
 logger = logging.getLogger(__name__)
 
-_VECTOR_SIZE = 1536
+_VECTOR_SIZE = 1024
 _ENCODING = "cl100k_base"
 
 # Regex для section-aware chunking.
@@ -251,6 +251,16 @@ def _page_for_offset(char_offset: int, page_offsets: dict[int, int]) -> int:
 
 async def _ensure_collection(client: AsyncQdrantClient) -> None:
     exists = await client.collection_exists(settings.qdrant_collection)
+    if exists:
+        info = await client.get_collection(settings.qdrant_collection)
+        existing_size = info.config.params.vectors.size
+        if existing_size != _VECTOR_SIZE:
+            logger.warning(
+                "Collection '%s' has vector size %d, expected %d — recreating.",
+                settings.qdrant_collection, existing_size, _VECTOR_SIZE,
+            )
+            await client.delete_collection(settings.qdrant_collection)
+            exists = False
     if not exists:
         await client.create_collection(
             collection_name=settings.qdrant_collection,
@@ -310,7 +320,7 @@ async def ingest_pdf(filepath: str | Path, title: str) -> int:
 
     logger.info("Embedding %d chunks...", len(chunks))
     chunk_texts = [c["text"] for c in chunks]
-    vectors = await embedder.embed(chunk_texts)
+    vectors = await embedder.embed_passages(chunk_texts)
 
     for point, vector in zip(points, vectors):
         point.vector = vector

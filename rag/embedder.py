@@ -1,37 +1,37 @@
+import asyncio
 import logging
-from openai import AsyncOpenAI
-
-from config import settings
+from sentence_transformers import SentenceTransformer
 
 logger = logging.getLogger(__name__)
 
-_OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
+_MODEL_NAME = "intfloat/multilingual-e5-large"
+_model: SentenceTransformer | None = None
+
+
+def _get_model() -> SentenceTransformer:
+    global _model
+    if _model is None:
+        logger.info("Loading embedding model '%s'…", _MODEL_NAME)
+        _model = SentenceTransformer(_MODEL_NAME)
+    return _model
 
 
 class Embedder:
-    def __init__(self) -> None:
-        self._model = settings.embedding_model
-        self._client = AsyncOpenAI(
-            api_key=settings.openrouter_api_key,
-            base_url=_OPENROUTER_BASE_URL,
-        )
-
-    async def embed(self, texts: list[str]) -> list[list[float]]:
+    async def embed_passages(self, texts: list[str]) -> list[list[float]]:
         if not texts:
             return []
-        try:
-            response = await self._client.embeddings.create(
-                model=self._model,
-                input=texts,
-            )
-            return [item.embedding for item in response.data]
-        except Exception as e:
-            logger.error("Embedding batch failed (n=%d): %s", len(texts), e)
-            raise
+        model = _get_model()
+        prefixed = [f"passage: {t}" for t in texts]
+        return await asyncio.to_thread(
+            lambda: model.encode(prefixed, normalize_embeddings=True).tolist()
+        )
 
-    async def embed_one(self, text: str) -> list[float]:
-        results = await self.embed([text])
-        return results[0]
+    async def embed_query(self, text: str) -> list[float]:
+        model = _get_model()
+        prefixed = f"query: {text}"
+        return await asyncio.to_thread(
+            lambda: model.encode([prefixed], normalize_embeddings=True)[0].tolist()
+        )
 
     async def aclose(self) -> None:
-        await self._client.close()
+        pass  # model is a process-wide singleton; nothing to close
