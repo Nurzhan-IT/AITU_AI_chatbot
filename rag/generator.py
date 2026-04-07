@@ -2,6 +2,7 @@ import logging
 from collections import defaultdict
 from typing import Any
 
+import tiktoken
 from langdetect import detect
 
 from config import settings
@@ -39,8 +40,13 @@ _NO_CONTEXT_PROMPT = """В базе документов не найдено р�
 Отвечай на том же языке, что и вопрос."""
 
 
-def _build_context(chunks: list[dict]) -> str:
-    lines = []
+MAX_CONTEXT_TOKENS = 6000
+
+
+def _build_context(chunks: list[dict], max_tokens: int = MAX_CONTEXT_TOKENS) -> str:
+    enc = tiktoken.get_encoding("cl100k_base")
+    parts = []
+    used = 0
     for i, chunk in enumerate(chunks, 1):
         doc = chunk.get("doc_title", "Документ")
         page = chunk.get("page", 0)
@@ -59,8 +65,13 @@ def _build_context(chunks: list[dict]) -> str:
         elif page:
             header_parts.append(f"стр. {page}")
 
-        lines.append(f"{', '.join(header_parts)}:\n{text}")
-    return "\n\n---\n\n".join(lines)
+        block = f"{', '.join(header_parts)}:\n{text}\n\n---\n\n"
+        block_tokens = len(enc.encode(block))
+        if used + block_tokens > max_tokens:
+            break
+        parts.append(block)
+        used += block_tokens
+    return "".join(parts)
 
 
 def _deduplicate_sources(chunks: list[dict]) -> list[dict]:
