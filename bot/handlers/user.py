@@ -5,7 +5,7 @@ from aiogram import F, Router
 from aiogram.filters import Command
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, Message
 
-from rag.generator import Generator
+from rag.generator import Generator, detect_language
 from rag.retriever import Retriever
 
 logger = logging.getLogger(__name__)
@@ -87,7 +87,8 @@ async def handle_question(message: Message) -> None:
     status_msg = await message.answer("🔍 Ищу информацию...")
 
     try:
-        chunks = await _retriever.search(query)
+        detected_lang = detect_language(query)
+        chunks = await _retriever.search_multilingual(query, detected_lang)
     except Exception as e:
         logger.error("Retrieval failed for user %s: %s", message.from_user and message.from_user.id, e)
         await status_msg.edit_text("😔 Не удалось выполнить поиск. Попробуйте позже.")

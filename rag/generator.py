@@ -17,6 +17,27 @@ def detect_language(text: str) -> str:
     except Exception:
         return "Russian"
 
+
+async def translate_query(question: str, target_lang: str) -> str | None:
+    """Translate question to target_lang using the configured LLM. Returns None on failure."""
+    try:
+        client = _make_llm_client()
+        prompt = (
+            f"Translate the following question to {target_lang}. "
+            f"Return ONLY the translated question, no explanation.\n\n"
+            f"Question: {question}"
+        )
+        response = await client.chat.completions.create(
+            model=settings.llm_model,
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=200,
+            temperature=0,
+        )
+        return response.choices[0].message.content.strip()
+    except Exception:
+        return None
+
+
 _SYSTEM_PROMPT = """You are a university consultation assistant for AITU (Astana IT University).
 
 Rules:

@@ -62,6 +62,63 @@ class Retriever:
         logger.debug("search('%s'): %d hits", query[:60], len(hits))
         return hits
 
+    async def search_multilingual(
+        self,
+        question: str,
+        detected_lang: str,
+        top_k: int | None = None,
+    ) -> list[dict]:
+        """Search with the original query plus a translation, merge results by score."""
+        from rag.generator import translate_query
+
+        await self._ensure_collection()
+        limit = top_k if top_k is not None else settings.top_k
+
+        other_lang = "English" if detected_lang == "Russian" else "Russian"
+        translation = await translate_query(question, other_lang)
+
+        queries = [question]
+        if translation:
+            queries.append(translation)
+
+        seen_ids: set = set()
+        all_results: list[dict] = []
+        for q in queries:
+            vector = await self._embedder.embed_query(q)
+            results = await self._client.search(
+                collection_name=settings.qdrant_collection,
+                query_vector=vector,
+                limit=limit,
+                with_payload=True,
+            )
+            for point in results:
+                if point.id in seen_ids:
+                    continue
+                seen_ids.add(point.id)
+                p = point.payload or {}
+                filename = p.get("filename", "")
+                url = f"{settings.pdf_base_url.rstrip('/')}/{filename}" if filename else ""
+                page = p.get("page", 0)
+                all_results.append({
+                    "text": p.get("text", ""),
+                    "doc_title": p.get("doc_title", ""),
+                    "filename": filename,
+                    "url": url,
+                    "page": page,
+                    "page_end": p.get("page_end", page),
+                    "section_title": p.get("section_title", ""),
+                    "paragraph_range": p.get("paragraph_range", ""),
+                    "score": point.score,
+                })
+
+        all_results.sort(key=lambda h: h["score"], reverse=True)
+        merged = all_results[:limit]
+        logger.debug(
+            "search_multilingual('%s', lang=%s): %d queries → %d merged hits",
+            question[:60], detected_lang, len(queries), len(merged),
+        )
+        return merged
+
     async def get_all_documents(self) -> list[dict]:
         """Return unique documents (one entry per filename) stored in the collection."""
         await self._ensure_collection()
