@@ -37,7 +37,6 @@ _HELP_TEXT = (
 )
 
 MAX_TG_LEN = 4000
-MIN_QUERY_LENGTH = 5
 
 
 async def send_long_message(message, text: str):
@@ -76,25 +75,21 @@ async def cmd_help(message: Message) -> None:
 
 @router.message(F.text)
 async def handle_question(message: Message) -> None:
-    query = (message.text or "").strip()
-    if len(query) < MIN_QUERY_LENGTH:
-        await message.answer(
-            "Пожалуйста, задайте более конкретный вопрос.\n"
-            "Please ask a more specific question."
-        )
+    question = (message.text or "").strip()
+    if not question:
         return
 
     status_msg = await message.answer("🔍 Ищу информацию...")
 
     try:
-        chunks = await _retriever.search(query)
+        chunks = await _retriever.search(question)
     except Exception as e:
         logger.error("Retrieval failed for user %s: %s", message.from_user and message.from_user.id, e)
         await status_msg.edit_text("😔 Не удалось выполнить поиск. Попробуйте позже.")
         return
 
     try:
-        result = await _generator.generate(query, chunks)
+        result = await _generator.generate(question, chunks)
     except Exception as e:
         logger.error("Generation failed for user %s: %s", message.from_user and message.from_user.id, e)
         await status_msg.edit_text("😔 Не удалось сформировать ответ. Попробуйте позже.")

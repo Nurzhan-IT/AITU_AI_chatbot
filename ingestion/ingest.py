@@ -29,9 +29,6 @@ _SECTION_RE = re.compile(
 )
 _PARAGRAPH_RE = re.compile(r'(?=^\s{0,4}\d{1,3}[\.\)]\s)', re.MULTILINE)
 
-_enc = tiktoken.get_encoding(_ENCODING)
-MIN_CHUNK_TOKENS = 80
-
 
 # ---------------------------------------------------------------------------
 # Parse
@@ -284,13 +281,6 @@ async def ingest_pdf(filepath: str | Path, title: str) -> int:
 
     chunks = chunk_by_sections(text, page_offsets, settings.chunk_size, settings.chunk_overlap)
     logger.info("Split into %d chunks", len(chunks))
-
-    before_filter = len(chunks)
-    chunks = [c for c in chunks if len(_enc.encode(c["text"])) >= MIN_CHUNK_TOKENS]
-    logger.info(
-        "Chunk filter: kept %d / %d (discarded %d short chunks)",
-        len(chunks), before_filter, before_filter - len(chunks),
-    )
 
     embedder = Embedder()
     client = AsyncQdrantClient(host=settings.qdrant_host, port=settings.qdrant_port)
