@@ -1,37 +1,50 @@
-import asyncio
+import math
 import logging
-from sentence_transformers import SentenceTransformer
+from openai import AsyncOpenAI
+from config import settings
 
 logger = logging.getLogger(__name__)
 
 _MODEL_NAME = "intfloat/multilingual-e5-large"
-_model: SentenceTransformer | None = None
+_BATCH_SIZE = 96  # stay safely under request-size limits
+_client: AsyncOpenAI | None = None
 
 
-def _get_model() -> SentenceTransformer:
-    global _model
-    if _model is None:
-        logger.info("Loading embedding model '%s'…", _MODEL_NAME)
-        _model = SentenceTransformer(_MODEL_NAME)
-    return _model
+def _get_client() -> AsyncOpenAI:
+    global _client
+    if _client is None:
+        _client = AsyncOpenAI(
+            base_url="https://openrouter.ai/api/v1",
+            api_key=settings.openrouter_api_key,
+        )
+    return _client
+
+
+def _normalize(vec: list[float]) -> list[float]:
+    norm = math.sqrt(sum(x * x for x in vec))
+    return [x / norm for x in vec] if norm > 1e-9 else vec
 
 
 class Embedder:
     async def embed_passages(self, texts: list[str]) -> list[list[float]]:
         if not texts:
             return []
-        model = _get_model()
+        client = _get_client()
         prefixed = [f"passage: {t}" for t in texts]
-        return await asyncio.to_thread(
-            lambda: model.encode(prefixed, normalize_embeddings=True).tolist()
-        )
+        results: list[list[float]] = []
+        for i in range(0, len(prefixed), _BATCH_SIZE):
+            batch = prefixed[i : i + _BATCH_SIZE]
+            resp = await client.embeddings.create(model=_MODEL_NAME, input=batch)
+            resp.data.sort(key=lambda d: d.index)
+            results.extend(_normalize(d.embedding) for d in resp.data)
+        return results
 
     async def embed_query(self, text: str) -> list[float]:
-        model = _get_model()
-        prefixed = f"query: {text}"
-        return await asyncio.to_thread(
-            lambda: model.encode([prefixed], normalize_embeddings=True)[0].tolist()
+        client = _get_client()
+        resp = await client.embeddings.create(
+            model=_MODEL_NAME, input=[f"query: {text}"]
         )
+        return _normalize(resp.data[0].embedding)
 
     async def aclose(self) -> None:
-        pass  # model is a process-wide singleton; nothing to close
+        pass  # client is a module-level singleton; nothing to close

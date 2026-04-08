@@ -22,6 +22,9 @@ class Settings(BaseSettings):
     # OpenRouter (used only when llm_provider == "openrouter")
     openrouter_api_key: str = ""
 
+    # Embeddings
+    embedding_model: str = "intfloat/multilingual-e5-large"
+
     # Qdrant
     qdrant_host: str = "localhost"
     qdrant_port: int = 6333

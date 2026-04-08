@@ -87,8 +87,7 @@ async def handle_question(message: Message) -> None:
     status_msg = await message.answer("🔍 Ищу информацию...")
 
     try:
-        detected_lang = detect_language(query)
-        chunks = await _retriever.search_multilingual(query, detected_lang)
+        chunks = await _retriever.search(query)
     except Exception as e:
         logger.error("Retrieval failed for user %s: %s", message.from_user and message.from_user.id, e)
         await status_msg.edit_text("😔 Не удалось выполнить поиск. Попробуйте позже.")
