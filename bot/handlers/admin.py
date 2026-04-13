@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import math
 from datetime import datetime
@@ -85,62 +86,57 @@ async def cmd_upload(message: Message, bot: Bot) -> None:
         await status_msg.edit_text(f"❌ Ошибка при скачивании файла: {e}")
         return
 
-    await status_msg.edit_text("⏳ Индексирую...")
+    await status_msg.edit_text("⏳ Начинаю индексацию в фоне...")
 
-    try:
-        title = dest.stem
-        n_chunks = await ingest_pdf(dest, title=title)
-    except Exception as e:
-        logger.error("Failed to ingest '%s': %s", doc.file_name, e)
-        await status_msg.edit_text(f"❌ Ошибка при индексации: {e}")
-        return
+    title = dest.stem
 
-    # Record upload in file history
-    await repository.record_file_event(doc.file_name, title, "uploaded", n_chunks)
+    async def _progress(text: str) -> None:
+        try:
+            await status_msg.edit_text(text)
+        except Exception:
+            pass
 
-    # Check if this upload replaces an existing document
-    retriever_tmp = Retriever()
-    existing_docs = await retriever_tmp.get_all_documents()
-    existing_names = [d["filename"] for d in existing_docs if d["filename"] != doc.file_name]
-    similar = _find_similar_filename(doc.file_name, existing_names)
-    if similar:
-        await message.answer(
-            f"ℹ️ Похожий документ найден: <code>{similar}</code>\n"
-            f"Этот файл заменяет его? Ответьте /confirm_replace {similar} или /skip_replace",
+    async def _run_ingest() -> None:
+        try:
+            n_chunks = await ingest_pdf(dest, title=title, progress_cb=_progress)
+        except Exception as e:
+            logger.error("Failed to ingest '%s': %s", doc.file_name, e)
+            await _progress(f"❌ Ошибка при индексации: {e}")
+            return
+
+        await repository.record_file_event(doc.file_name, title, "uploaded", n_chunks)
+
+        await _progress(
+            f"✅ <b>{doc.file_name}</b> проиндексирован.\n"
+            f"Загружено чанков: <b>{n_chunks}</b>\n"
+            f"⏳ Анализирую на дубликаты...",
+        )
+
+        # Run duplicate/stale detection (non-critical — upload already succeeded)
+        try:
+            found = await detector.analyze_new_document(
+                filepath=dest,
+                filename=doc.file_name,
+                doc_title=title,
+                bot=bot,
+                admin_id=settings.admin_telegram_id,
+            )
+            suffix = (
+                f"⚠️ Найдено предупреждений: <b>{len(found)}</b>. Используйте /warnings"
+                if found
+                else "✅ Дубликаты и устаревшие данные не обнаружены."
+            )
+        except Exception as e:
+            logger.error("Detection pipeline failed: %s", e)
+            suffix = "⚠️ Анализ дубликатов не выполнен."
+
+        await status_msg.edit_text(
+            f"✅ <b>{doc.file_name}</b> проиндексирован.\n"
+            f"Загружено чанков: <b>{n_chunks}</b>\n{suffix}",
             parse_mode="HTML",
         )
-        _pending_replace[message.from_user.id] = (doc.file_name, similar)
 
-    await status_msg.edit_text(
-        f"✅ <b>{doc.file_name}</b> проиндексирован.\n"
-        f"Загружено чанков: <b>{n_chunks}</b>\n"
-        f"⏳ Анализирую на дубликаты...",
-        parse_mode="HTML",
-    )
-
-    # Run duplicate/stale detection (non-critical — upload already succeeded)
-    try:
-        found = await detector.analyze_new_document(
-            filepath=dest,
-            filename=doc.file_name,
-            doc_title=title,
-            bot=bot,
-            admin_id=settings.admin_telegram_id,
-        )
-        if found:
-            suffix = f"⚠️ Найдено предупреждений: <b>{len(found)}</b>. Используйте /warnings"
-        else:
-            suffix = "✅ Дубликаты и устаревшие данные не обнаружены."
-    except Exception as e:
-        logger.error("Detection pipeline failed for '%s': %s", doc.file_name, e)
-        suffix = "⚠️ Анализ дубликатов не выполнен."
-
-    await status_msg.edit_text(
-        f"✅ <b>{doc.file_name}</b> проиндексирован.\n"
-        f"Загружено чанков: <b>{n_chunks}</b>\n"
-        f"{suffix}",
-        parse_mode="HTML",
-    )
+    asyncio.create_task(_run_ingest())
 
 
 # ---------------------------------------------------------------------------

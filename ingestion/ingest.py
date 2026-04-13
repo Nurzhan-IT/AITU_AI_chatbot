@@ -5,6 +5,7 @@ import re
 import uuid
 from datetime import datetime
 from pathlib import Path
+from typing import Callable, Awaitable
 from urllib.parse import quote
 
 import pymupdf4llm
@@ -290,7 +291,19 @@ async def _ensure_collection(client: AsyncQdrantClient) -> None:
 # Full pipeline
 # ---------------------------------------------------------------------------
 
-async def ingest_pdf(filepath: str | Path, title: str) -> int:
+async def _notify(cb: Callable[[str], Awaitable[None]] | None, msg: str) -> None:
+    if cb is not None:
+        try:
+            await cb(msg)
+        except Exception:
+            pass
+
+
+async def ingest_pdf(
+    filepath: str | Path,
+    title: str,
+    progress_cb: Callable[[str], Awaitable[None]] | None = None,
+) -> int:
     """Ingest a PDF into Qdrant. Returns the number of chunks upserted."""
     path = Path(filepath)
     filename = path.name
@@ -298,9 +311,11 @@ async def ingest_pdf(filepath: str | Path, title: str) -> int:
 
     logger.info("Parsing '%s'...", filename)
     text, page_offsets = parse_pdf(path)
+    await _notify(progress_cb, "⚙️ Разбиваю на чанки...")
 
     chunks = chunk_by_sections(text, page_offsets, settings.chunk_size, settings.chunk_overlap)
     logger.info("Split into %d chunks", len(chunks))
+    await _notify(progress_cb, f"🔢 Создаю эмбеддинги для {len(chunks)} фрагментов...")
 
     embedder = Embedder()
     client = AsyncQdrantClient(host=settings.qdrant_host, port=settings.qdrant_port, timeout=60)
@@ -334,6 +349,7 @@ async def ingest_pdf(filepath: str | Path, title: str) -> int:
     logger.info("Embedding %d chunks...", len(chunks))
     chunk_texts = [c["text"] for c in chunks]
     vectors = await embedder.embed_passages(chunk_texts)
+    await _notify(progress_cb, "💾 Сохраняю в базу...")
 
     for point, vector in zip(points, vectors):
         point.vector = vector
