@@ -23,15 +23,18 @@ async def record_file_event(
     filename: str,
     doc_title: str,
     event: str,          # 'uploaded' | 'deleted'
-    chunk_count: int,
+    chunk_count: int = 0,
+    replaces_filename: str | None = None,
+    document_date: str | None = None,
 ) -> None:
     async with aiosqlite.connect(_get_path()) as db:
         await db.execute(
             """
-            INSERT INTO file_history (filename, doc_title, event, chunk_count, timestamp)
-            VALUES (?, ?, ?, ?, ?)
+            INSERT INTO file_history
+                (filename, doc_title, event, chunk_count, timestamp, replaces_filename, document_date)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
             """,
-            (filename, doc_title, event, chunk_count, _now_utc()),
+            (filename, doc_title, event, chunk_count, _now_utc(), replaces_filename, document_date),
         )
         await db.commit()
     logger.debug("Recorded file event '%s' for '%s'", event, filename)

@@ -84,6 +84,22 @@ async def init_db(db_path: str = "data/bot.db", log_path: str = "duplicate_detec
             CREATE INDEX IF NOT EXISTS idx_warnings_resolved  ON warnings(resolved);
             CREATE INDEX IF NOT EXISTS idx_warnings_new_file  ON warnings(new_filename);
             CREATE INDEX IF NOT EXISTS idx_file_history_fname ON file_history(filename);
+        """)
+
+        # Add new columns if migrating from older schema (idempotent)
+        for col, definition in [
+            ("replaces_filename", "TEXT"),
+            ("document_date",     "TEXT"),
+        ]:
+            try:
+                await db.execute(
+                    f"ALTER TABLE file_history ADD COLUMN {col} {definition}"
+                )
+            except Exception:
+                pass  # Column already exists
+        await db.commit()
+
+        await db.executescript("""
 
             CREATE TABLE IF NOT EXISTS query_logs (
                 id            INTEGER PRIMARY KEY AUTOINCREMENT,

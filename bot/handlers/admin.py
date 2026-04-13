@@ -1,6 +1,7 @@
 import logging
 import math
 from datetime import datetime
+from difflib import SequenceMatcher
 from pathlib import Path
 
 from aiogram import Bot, Router
@@ -17,6 +18,21 @@ router = Router()
 
 _PDFS_DIR = Path("pdfs")
 _WARNINGS_PAGE_SIZE = 5
+_pending_replace: dict[int, tuple[str, str]] = {}
+
+
+def _find_similar_filename(new_name: str, existing_names: list[str], threshold: float = 0.6) -> str | None:
+    """Return the most similar existing filename if similarity >= threshold, else None."""
+    best_ratio = 0.0
+    best_match = None
+    for name in existing_names:
+        ratio = SequenceMatcher(None, new_name.lower(), name.lower()).ratio()
+        if ratio > best_ratio:
+            best_ratio = ratio
+            best_match = name
+    if best_ratio >= threshold and best_match != new_name:
+        return best_match
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -82,6 +98,19 @@ async def cmd_upload(message: Message, bot: Bot) -> None:
     # Record upload in file history
     await repository.record_file_event(doc.file_name, title, "uploaded", n_chunks)
 
+    # Check if this upload replaces an existing document
+    retriever_tmp = Retriever()
+    existing_docs = await retriever_tmp.get_all_documents()
+    existing_names = [d["filename"] for d in existing_docs if d["filename"] != doc.file_name]
+    similar = _find_similar_filename(doc.file_name, existing_names)
+    if similar:
+        await message.answer(
+            f"ℹ️ Похожий документ найден: <code>{similar}</code>\n"
+            f"Этот файл заменяет его? Ответьте /confirm_replace {similar} или /skip_replace",
+            parse_mode="HTML",
+        )
+        _pending_replace[message.from_user.id] = (doc.file_name, similar)
+
     await status_msg.edit_text(
         f"✅ <b>{doc.file_name}</b> проиндексирован.\n"
         f"Загружено чанков: <b>{n_chunks}</b>\n"
@@ -112,6 +141,32 @@ async def cmd_upload(message: Message, bot: Bot) -> None:
         f"{suffix}",
         parse_mode="HTML",
     )
+
+
+# ---------------------------------------------------------------------------
+# /confirm_replace  /skip_replace
+# ---------------------------------------------------------------------------
+
+@router.message(Command("confirm_replace"))
+async def cmd_confirm_replace(message: Message) -> None:
+    user_id = message.from_user.id if message.from_user else 0
+    pending = _pending_replace.pop(user_id, None)
+    if not pending:
+        await message.answer("Нет ожидающего подтверждения замены.")
+        return
+    new_name, old_name = pending
+    await repository.record_file_event(new_name, new_name, "uploaded", 0, replaces_filename=old_name)
+    await message.answer(
+        f"✅ Записано: <code>{new_name}</code> заменяет <code>{old_name}</code>.",
+        parse_mode="HTML",
+    )
+
+
+@router.message(Command("skip_replace"))
+async def cmd_skip_replace(message: Message) -> None:
+    user_id = message.from_user.id if message.from_user else 0
+    _pending_replace.pop(user_id, None)
+    await message.answer("ℹ️ Связь с предыдущей версией не записана.")
 
 
 # ---------------------------------------------------------------------------
