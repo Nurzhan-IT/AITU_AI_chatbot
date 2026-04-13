@@ -92,7 +92,7 @@ def _build_context(chunks: list[dict], max_tokens: int = MAX_CONTEXT_TOKENS) -> 
 
 
 def _deduplicate_sources(chunks: list[dict]) -> list[dict]:
-    """Group chunks by filename → {doc_title, url, pages: sorted list}."""
+    """Group chunks by filename → {doc_title, url, uploaded_at, pages: sorted list}."""
     grouped: dict[str, dict] = {}
     pages: dict[str, set[int]] = defaultdict(set)
 
@@ -105,6 +105,7 @@ def _deduplicate_sources(chunks: list[dict]) -> list[dict]:
                 "doc_title": chunk.get("doc_title", ""),
                 "filename": filename,
                 "url": chunk.get("url", ""),
+                "uploaded_at": chunk.get("uploaded_at", ""),
             }
         page = chunk.get("page", 0)
         page_end = chunk.get("page_end", page)

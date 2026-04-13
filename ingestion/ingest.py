@@ -289,6 +289,8 @@ async def ingest_pdf(filepath: str | Path, title: str) -> int:
 
     points: list[PointStruct] = []
 
+    uploaded_at = datetime.now(TZ_UTC5).isoformat()
+
     for chunk_index, chunk in enumerate(chunks):
         points.append(
             PointStruct(
@@ -298,6 +300,7 @@ async def ingest_pdf(filepath: str | Path, title: str) -> int:
                     "doc_title": title,
                     "filename": filename,
                     "url": url,
+                    "uploaded_at": uploaded_at,
                     "page": chunk["page"],
                     "page_end": chunk["page_end"],
                     "chunk_index": chunk_index,

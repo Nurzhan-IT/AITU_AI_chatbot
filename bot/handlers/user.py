@@ -1,11 +1,12 @@
 import logging
+from datetime import datetime
 from urllib.parse import quote, urlsplit, urlunsplit
 
 from aiogram import F, Router
 from aiogram.filters import Command
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, Message
 
-from rag.generator import Generator, detect_language
+from rag.generator import Generator
 from rag.retriever import Retriever
 
 logger = logging.getLogger(__name__)
@@ -102,6 +103,8 @@ async def handle_question(message: Message) -> None:
         text += "\n\n📄 Источники:\n"
         text += _build_sources_text(sources)
 
+    text += "\n\n" + _disclaimer(result["detected_lang"])
+
     keyboard = _build_keyboard(sources)
     if len(text) <= MAX_TG_LEN:
         await status_msg.edit_text(text, reply_markup=keyboard)
@@ -120,14 +123,43 @@ def _encode_url(url: str) -> str:
     return urlunsplit((parts.scheme, parts.netloc, encoded_path, parts.query, parts.fragment))
 
 
+def _format_uploaded_at(raw: str) -> str:
+    """Parse ISO timestamp and return DD.MM.YYYY, or empty string if absent/invalid."""
+    if not raw:
+        return ""
+    try:
+        dt = datetime.fromisoformat(raw)
+        return dt.strftime("%d.%m.%Y")
+    except ValueError:
+        return ""
+
+
 def _build_sources_text(sources: list[dict]) -> str:
     lines = []
     for src in sources:
         doc_title = src.get("doc_title", "")
         pages = src.get("pages", [])
         pages_str = ", ".join(str(p) for p in pages)
-        lines.append(f"• {doc_title} — стр. {pages_str}" if pages_str else f"• {doc_title}")
+        date_str = _format_uploaded_at(src.get("uploaded_at", ""))
+
+        line = f"• {doc_title}"
+        if pages_str:
+            line += f" — стр. {pages_str}"
+        if date_str:
+            line += f" (загружено {date_str})"
+        lines.append(line)
     return "\n".join(lines)
+
+
+_DISCLAIMER = {
+    "Russian": "⚠️ ИИ может допускать ошибки. Проверяйте важную информацию.",
+    "Kazakh": "⚠️ ЖИ қателесуі мүмкін. Маңызды ақпаратты тексеріңіз.",
+    "English": "⚠️ AI may make mistakes. Please verify important information.",
+}
+
+
+def _disclaimer(detected_lang: str) -> str:
+    return _DISCLAIMER.get(detected_lang, _DISCLAIMER["English"])
 
 
 def _build_keyboard(sources: list[dict]) -> InlineKeyboardMarkup | None:
