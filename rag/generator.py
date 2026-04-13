@@ -46,14 +46,10 @@ Rules:
    headers. For English documents use "Section X, p.Y"; for Russian documents use "п.X, стр.Y".
 3. Quote exact figures: dates, deadlines, counts, thresholds — do not paraphrase numbers.
 4. Use official terms as they appear in the documents.
-5. If the question cannot be answered from the provided fragments, say so explicitly.
+5. If the question cannot be answered from the provided fragments, write exactly [NO_ANSWER] as
+   the very first token of your response, then explain why in the same language as the question.
 6. LANGUAGE RULE: The user message will state the detected query language. You MUST respond
    in that exact language (Russian, English, or Kazakh), regardless of the document language.
-7. At the end of your answer, add a sources section:
-   - In Russian answers: "Источники:"
-   - In English answers: "Sources:"
-   - In Kazakh answers: "Дереккөздер:"
-   List each document title, section, and page you cited.
 """
 
 _NO_CONTEXT_PROMPT = """В базе документов не найдено релевантной информации по данному вопросу.
@@ -158,9 +154,16 @@ class Generator:
             answer = await self._call_llm(question, context=None, detected_lang=detected_lang)
             return {"answer": answer, "detected_lang": detected_lang, "sources": []}
 
+        _NO_ANSWER_MARKER = "[NO_ANSWER]"
+
         context = _build_context(chunks)
         answer = await self._call_llm(question, context=context, detected_lang=detected_lang)
-        sources = _deduplicate_sources(chunks)
+
+        if answer.lstrip().startswith(_NO_ANSWER_MARKER):
+            answer = answer.lstrip()[len(_NO_ANSWER_MARKER):].strip()
+            sources = []
+        else:
+            sources = _deduplicate_sources(chunks)
 
         logger.info(
             "generate: question='%.60s' lang=%s → %d chunks, %d sources",
