@@ -133,6 +133,9 @@ def _make_llm_client() -> Any:
         )
 
 
+MIN_CHUNK_SCORE = 0.55
+
+
 class Generator:
     def __init__(self) -> None:
         self._client = _make_llm_client()
@@ -149,6 +152,15 @@ class Generator:
             }
         """
         detected_lang = detect_language(question)
+
+        chunks = [c for c in chunks if c.get("score", 0) >= MIN_CHUNK_SCORE]
+        if not chunks:
+            logger.info(
+                "generate: all chunks below score threshold (%.2f), returning no-context answer",
+                MIN_CHUNK_SCORE,
+            )
+            answer = await self._call_llm(question, context=None, detected_lang=detected_lang)
+            return {"answer": answer, "detected_lang": detected_lang, "sources": []}
 
         if not chunks:
             logger.info("generate: no chunks provided, returning no-context answer")
