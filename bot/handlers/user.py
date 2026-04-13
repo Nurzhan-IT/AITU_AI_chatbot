@@ -1,5 +1,7 @@
 import logging
+from collections import defaultdict
 from datetime import datetime
+from time import time
 from urllib.parse import quote, urlsplit, urlunsplit
 
 from aiogram import F, Router
@@ -15,6 +17,21 @@ router = Router()
 
 _retriever = Retriever()
 _generator = Generator()
+
+_RATE_LIMIT = 10          # max requests per minute per user
+_RATE_WINDOW = 60.0       # seconds
+_user_timestamps: dict[int, list[float]] = defaultdict(list)
+
+
+def _is_rate_limited(user_id: int) -> bool:
+    now = time()
+    _user_timestamps[user_id] = [
+        t for t in _user_timestamps[user_id] if now - t < _RATE_WINDOW
+    ]
+    if len(_user_timestamps[user_id]) >= _RATE_LIMIT:
+        return True
+    _user_timestamps[user_id].append(now)
+    return False
 
 _START_TEXT = (
     "👋 Привет! Я университетский консультант-ассистент.\n\n"
@@ -79,6 +96,13 @@ async def cmd_help(message: Message) -> None:
 async def handle_question(message: Message) -> None:
     question = (message.text or "").strip()
     if not question:
+        return
+
+    user_id = message.from_user.id if message.from_user else 0
+    if _is_rate_limited(user_id):
+        await message.answer(
+            "⏳ Слишком много запросов. Пожалуйста, подождите немного."
+        )
         return
 
     status_msg = await message.answer("🔍 Ищу информацию...")
