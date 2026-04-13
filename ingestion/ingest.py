@@ -283,7 +283,7 @@ async def ingest_pdf(filepath: str | Path, title: str) -> int:
     logger.info("Split into %d chunks", len(chunks))
 
     embedder = Embedder()
-    client = AsyncQdrantClient(host=settings.qdrant_host, port=settings.qdrant_port)
+    client = AsyncQdrantClient(host=settings.qdrant_host, port=settings.qdrant_port, timeout=60)
 
     await _ensure_collection(client)
 

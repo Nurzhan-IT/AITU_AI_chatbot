@@ -16,6 +16,7 @@ class Retriever:
         self._client = AsyncQdrantClient(
             host=settings.qdrant_host,
             port=settings.qdrant_port,
+            timeout=60,
         )
         self._embedder = Embedder()
 
