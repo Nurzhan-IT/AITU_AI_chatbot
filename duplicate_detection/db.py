@@ -84,6 +84,21 @@ async def init_db(db_path: str = "data/bot.db", log_path: str = "duplicate_detec
             CREATE INDEX IF NOT EXISTS idx_warnings_resolved  ON warnings(resolved);
             CREATE INDEX IF NOT EXISTS idx_warnings_new_file  ON warnings(new_filename);
             CREATE INDEX IF NOT EXISTS idx_file_history_fname ON file_history(filename);
+
+            CREATE TABLE IF NOT EXISTS query_logs (
+                id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id       INTEGER,
+                query         TEXT    NOT NULL,
+                detected_lang TEXT,
+                avg_score     REAL,
+                sources       TEXT,
+                answer_length INTEGER,
+                timestamp     TEXT    NOT NULL,
+                feedback      INTEGER
+            );
+            CREATE INDEX IF NOT EXISTS idx_query_logs_user     ON query_logs(user_id);
+            CREATE INDEX IF NOT EXISTS idx_query_logs_ts       ON query_logs(timestamp);
+            CREATE INDEX IF NOT EXISTS idx_query_logs_feedback ON query_logs(feedback);
         """)
         await db.commit()
 

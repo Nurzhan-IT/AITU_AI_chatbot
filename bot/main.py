@@ -9,6 +9,7 @@ from aiogram.enums import ParseMode
 
 from config import settings, TZ_UTC5
 from bot.handlers import admin, user
+from bot.handlers.feedback import router as feedback_router
 from rag.retriever import Retriever
 
 logger = logging.getLogger(__name__)
@@ -53,6 +54,7 @@ async def main() -> None:
     # Admin router must be registered first — its filter rejects non-admins
     # before user router's catch-all F.text handler sees the message
     dp.include_router(admin.router)
+    dp.include_router(feedback_router)
     dp.include_router(user.router)
 
     logger.info("Starting polling...")

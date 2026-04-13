@@ -6,6 +6,7 @@ from aiogram import F, Router
 from aiogram.filters import Command
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, Message
 
+from bot.handlers.feedback import feedback_keyboard, log_query
 from rag.generator import Generator
 from rag.retriever import Retriever
 
@@ -40,9 +41,9 @@ _HELP_TEXT = (
 MAX_TG_LEN = 4000
 
 
-async def send_long_message(message, text: str):
+async def send_long_message(message, text: str, reply_markup=None):
     if len(text) <= MAX_TG_LEN:
-        await message.answer(text)
+        await message.answer(text, reply_markup=reply_markup)
         return
     parts = []
     while len(text) > MAX_TG_LEN:
@@ -52,8 +53,8 @@ async def send_long_message(message, text: str):
         parts.append(text[:split_at])
         text = text[split_at:].lstrip()
     parts.append(text)
-    for part in parts:
-        await message.answer(part)
+    for i, part in enumerate(parts):
+        await message.answer(part, reply_markup=reply_markup if i == len(parts) - 1 else None)
 
 
 # ---------------------------------------------------------------------------
@@ -96,6 +97,15 @@ async def handle_question(message: Message) -> None:
         await status_msg.edit_text("😔 Не удалось сформировать ответ. Попробуйте позже.")
         return
 
+    log_id = await log_query(
+        user_id=message.from_user.id if message.from_user else 0,
+        query=question,
+        detected_lang=result["detected_lang"],
+        chunks=chunks,
+        answer=result["answer"],
+        sources=result["sources"],
+    )
+
     text = f"💬 {result['answer']}"
 
     sources = result["sources"]
@@ -107,10 +117,18 @@ async def handle_question(message: Message) -> None:
 
     keyboard = _build_keyboard(sources)
     if len(text) <= MAX_TG_LEN:
-        await status_msg.edit_text(text, reply_markup=keyboard)
+        # Merge sources keyboard rows with feedback buttons into one markup
+        fb_kb = feedback_keyboard(log_id)
+        if keyboard:
+            combined = InlineKeyboardMarkup(
+                inline_keyboard=keyboard.inline_keyboard + fb_kb.inline_keyboard
+            )
+        else:
+            combined = fb_kb
+        await status_msg.edit_text(text, reply_markup=combined)
     else:
         await status_msg.delete()
-        await send_long_message(message, text)
+        await send_long_message(message, text, reply_markup=feedback_keyboard(log_id))
 
 
 # ---------------------------------------------------------------------------
