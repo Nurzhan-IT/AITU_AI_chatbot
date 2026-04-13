@@ -37,6 +37,7 @@ class Settings(BaseSettings):
     chunk_size: int = 400
     chunk_overlap: int = 80
     top_k: int = Field(default=5, ge=1, le=20)
+    min_chunk_score: float = Field(default=0.55, ge=0.0, le=1.0)
 
     # Duplicate / stale detection
     duplicate_threshold: float = Field(default=0.90, ge=0.0, le=1.0)

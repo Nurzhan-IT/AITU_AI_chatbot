@@ -9,6 +9,8 @@ from aiogram.filters import Command
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, Message
 
 from bot.handlers.feedback import feedback_keyboard, log_query
+from bot.keyboards.admin import admin_keyboard
+from config import settings
 from rag.generator import Generator
 from rag.retriever import Retriever
 
@@ -80,7 +82,10 @@ async def send_long_message(message, text: str, reply_markup=None):
 
 @router.message(Command("start"))
 async def cmd_start(message: Message) -> None:
-    await message.answer(_START_TEXT)
+    if message.from_user and message.from_user.id == settings.admin_telegram_id:
+        await message.answer(_START_TEXT, reply_markup=admin_keyboard())
+    else:
+        await message.answer(_START_TEXT)
 
 
 @router.message(Command("help"))
