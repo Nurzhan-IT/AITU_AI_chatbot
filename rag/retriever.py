@@ -1,5 +1,6 @@
 import logging
 
+import numpy as np
 from qdrant_client import AsyncQdrantClient
 from qdrant_client.models import Distance, FieldCondition, Filter, MatchValue, VectorParams
 
@@ -9,6 +10,44 @@ from rag.embedder import Embedder
 logger = logging.getLogger(__name__)
 
 _VECTOR_SIZE = 1024
+
+
+def mmr(
+    query_vec: list[float],
+    candidates: list[dict],
+    k: int = 5,
+    lambda_: float = 0.5,
+) -> list[dict]:
+    """Maximal Marginal Relevance re-ranking.
+    candidates must each have a '_vector' key with the chunk embedding.
+    """
+    if not candidates:
+        return []
+    vecs = np.array([c["_vector"] for c in candidates], dtype=float)
+    q = np.array(query_vec, dtype=float)
+    selected_indices: list[int] = []
+    remaining = list(range(len(candidates)))
+    for _ in range(min(k, len(remaining))):
+        if not selected_indices:
+            scores = vecs[remaining] @ q
+            best = remaining[int(np.argmax(scores))]
+        else:
+            best_score = -np.inf
+            best = remaining[0]
+            sel_vecs = vecs[selected_indices]
+            for i in remaining:
+                rel = float(vecs[i] @ q)
+                red = float(np.max(sel_vecs @ vecs[i]))
+                score = lambda_ * rel - (1 - lambda_) * red
+                if score > best_score:
+                    best_score = score
+                    best = i
+        selected_indices.append(best)
+        remaining.remove(best)
+    result = [candidates[i] for i in selected_indices]
+    for c in result:
+        c.pop("_vector", None)   # don't leak raw vectors downstream
+    return result
 
 
 class Retriever:
@@ -36,8 +75,9 @@ class Retriever:
         results = await self._client.search(
             collection_name=settings.qdrant_collection,
             query_vector=vector,
-            limit=settings.top_k,
+            limit=settings.top_k * 3,
             with_payload=True,
+            with_vectors=True,
         )
 
         hits = []
@@ -58,9 +98,11 @@ class Retriever:
                     "section_title": p.get("section_title", ""),
                     "paragraph_range": p.get("paragraph_range", ""),
                     "score": point.score,
+                    "_vector": point.vector,
                 }
             )
 
+        hits = mmr(vector, hits, k=settings.top_k)
         logger.debug("search('%s'): %d hits", query[:60], len(hits))
         return hits
 
@@ -85,13 +127,17 @@ class Retriever:
 
         seen_ids: set = set()
         all_results: list[dict] = []
+        original_query_vec: list[float] | None = None
         for q in queries:
             vector = await self._embedder.embed_query(q)
+            if original_query_vec is None:
+                original_query_vec = vector
             results = await self._client.search(
                 collection_name=settings.qdrant_collection,
                 query_vector=vector,
-                limit=limit,
+                limit=limit * 3,
                 with_payload=True,
+                with_vectors=True,
             )
             for point in results:
                 if point.id in seen_ids:
@@ -112,10 +158,10 @@ class Retriever:
                     "section_title": p.get("section_title", ""),
                     "paragraph_range": p.get("paragraph_range", ""),
                     "score": point.score,
+                    "_vector": point.vector,
                 })
 
-        all_results.sort(key=lambda h: h["score"], reverse=True)
-        merged = all_results[:limit]
+        merged = mmr(original_query_vec, all_results, k=limit)
         logger.debug(
             "search_multilingual('%s', lang=%s): %d queries → %d merged hits",
             question[:60], detected_lang, len(queries), len(merged),

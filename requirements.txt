@@ -11,3 +11,4 @@ httpx<0.28.0
 aiosqlite==0.20.0
 fpdf2==2.7.9
 langdetect==1.0.9
+numpy
