@@ -331,6 +331,57 @@ async def cmd_health(message: Message) -> None:
 
 
 # ---------------------------------------------------------------------------
+# /stats
+# ---------------------------------------------------------------------------
+
+@router.message(Command("stats"))
+async def cmd_stats(message: Message) -> None:
+    """Show basic query analytics for the last 7 days."""
+    import aiosqlite
+    from config import settings
+
+    async with aiosqlite.connect(settings.sqlite_db_path) as db:
+        db.row_factory = aiosqlite.Row
+
+        row = await (await db.execute(
+            """SELECT
+                 COUNT(*)                                  AS total,
+                 COUNT(CASE WHEN feedback = 1  THEN 1 END) AS thumbs_up,
+                 COUNT(CASE WHEN feedback = -1 THEN 1 END) AS thumbs_down,
+                 ROUND(AVG(avg_score), 3)                  AS avg_sim,
+                 COUNT(CASE WHEN detected_lang='Russian' THEN 1 END) AS lang_ru,
+                 COUNT(CASE WHEN detected_lang='English' THEN 1 END) AS lang_en,
+                 COUNT(CASE WHEN detected_lang='Kazakh'  THEN 1 END) AS lang_kk
+               FROM query_logs
+               WHERE timestamp >= datetime('now', '-7 days')"""
+        )).fetchone()
+
+        top_rows = await (await db.execute(
+            """SELECT query, COUNT(*) AS cnt
+               FROM query_logs
+               WHERE timestamp >= datetime('now', '-7 days')
+               GROUP BY lower(trim(query))
+               ORDER BY cnt DESC
+               LIMIT 5"""
+        )).fetchall()
+
+    lines = [
+        "📊 <b>Статистика за 7 дней</b>",
+        f"Запросов: <b>{row['total']}</b>",
+        f"👍 {row['thumbs_up']}  👎 {row['thumbs_down']}",
+        f"Средняя близость: {row['avg_sim'] or '—'}",
+        f"RU: {row['lang_ru']}  EN: {row['lang_en']}  KZ: {row['lang_kk']}",
+        "",
+        "<b>Топ-5 вопросов:</b>",
+    ]
+    for r in top_rows:
+        q = r["query"][:80].replace("<", "&lt;")
+        lines.append(f"• ({r['cnt']}×) {q}")
+
+    await message.answer("\n".join(lines), parse_mode="HTML")
+
+
+# ---------------------------------------------------------------------------
 # /report
 # ---------------------------------------------------------------------------
 
