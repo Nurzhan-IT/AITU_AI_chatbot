@@ -46,5 +46,12 @@ class Embedder:
         )
         return _normalize(resp.data[0].embedding)
 
+    async def ping(self) -> bool:
+        try:
+            await self.embed_query("ping")
+            return True
+        except Exception:
+            return False
+
     async def aclose(self) -> None:
         pass  # client is a module-level singleton; nothing to close

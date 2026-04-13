@@ -142,6 +142,18 @@ class Generator:
         self._provider = settings.llm_provider
         self._model = settings.llm_model
 
+    async def ping(self) -> bool:
+        try:
+            response = await self._client.chat.completions.create(
+                model=self._model,
+                messages=[{"role": "user", "content": "ping"}],
+                max_tokens=1,
+                temperature=0,
+            )
+            return bool(response.choices)
+        except Exception:
+            return False
+
     async def generate(self, question: str, chunks: list[dict]) -> dict:
         """
         Returns:

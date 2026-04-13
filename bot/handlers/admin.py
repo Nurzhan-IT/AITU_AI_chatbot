@@ -305,6 +305,32 @@ async def cmd_history(message: Message) -> None:
 
 
 # ---------------------------------------------------------------------------
+# /health
+# ---------------------------------------------------------------------------
+
+@router.message(Command("health"))
+async def cmd_health(message: Message) -> None:
+    from rag.generator import Generator as Gen
+    from rag.embedder import Embedder as Emb
+
+    retriever = Retriever()
+    generator = Gen()
+    embedder = Emb()
+
+    qdrant_ok  = await retriever.ping()
+    llm_ok     = await generator.ping()
+    embed_ok   = await embedder.ping()
+
+    lines = [
+        "🩺 <b>Health Check</b>",
+        f"Qdrant:    {'✅' if qdrant_ok  else '❌'}",
+        f"LLM (Groq/OpenRouter): {'✅' if llm_ok else '❌'}",
+        f"Embedder:  {'✅' if embed_ok  else '❌'}",
+    ]
+    await message.answer("\n".join(lines), parse_mode="HTML")
+
+
+# ---------------------------------------------------------------------------
 # /report
 # ---------------------------------------------------------------------------
 
