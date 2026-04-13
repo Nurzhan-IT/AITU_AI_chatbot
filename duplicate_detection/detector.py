@@ -229,7 +229,7 @@ async def _run_analysis(
     embedder = Embedder()
     try:
         chunk_texts = [c["text"] for _, c in filterable]
-        vectors = await embedder.embed(chunk_texts)
+        vectors = await embedder.embed_passages(chunk_texts)
     finally:
         await embedder.aclose()
     logger.info(
