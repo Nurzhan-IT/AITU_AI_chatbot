@@ -8,6 +8,7 @@ from pathlib import Path
 from urllib.parse import quote
 
 import pymupdf4llm
+import fitz                  # PyMuPDF raw text extraction for accurate page offsets
 import tiktoken
 from qdrant_client import AsyncQdrantClient
 from qdrant_client.models import Distance, PointStruct, VectorParams
@@ -34,6 +35,26 @@ _PARAGRAPH_RE = re.compile(r'(?=^\s{0,4}\d{1,3}[\.\)]\s)', re.MULTILINE)
 # Parse
 # ---------------------------------------------------------------------------
 
+def _build_fitz_page_map(filepath: str | Path) -> dict[int, int]:
+    """Build char-offset → page-number map using fitz raw text.
+
+    Returns a dict where each key is the cumulative character offset at the
+    START of a page, and the value is the 1-based page number.
+    This mirrors the format expected by _page_for_offset().
+    """
+    doc = fitz.open(str(filepath))
+    page_map: dict[int, int] = {}
+    cumulative = 0
+    for page in doc:
+        page_num = page.number + 1          # fitz is 0-indexed
+        page_map[cumulative] = page_num
+        text = page.get_text("text")
+        cumulative += len(text)
+        page_map[cumulative] = page_num     # end-of-page offset also maps to this page
+    doc.close()
+    return page_map
+
+
 def parse_pdf(filepath: str | Path) -> tuple[str, dict[int, int]]:
     """Return (markdown_text, page_char_offsets).
 
@@ -43,14 +64,13 @@ def parse_pdf(filepath: str | Path) -> tuple[str, dict[int, int]]:
     path = Path(filepath)
     pages: list[dict] = pymupdf4llm.to_markdown(str(path), page_chunks=True)
 
-    full_text = ""
-    page_offsets: dict[int, int] = {}
-    for page in pages:
-        page_num: int = page.get("metadata", {}).get("page", 1)  # pymupdf4llm already 1-based
-        page_offsets[len(full_text)] = page_num  # начало страницы
-        full_text += page.get("text", "")
-        page_offsets[len(full_text)] = page_num  # конец страницы
-
+    full_text = "".join(page.get("text", "") for page in pages)
+    # NOTE: page_offsets is built from fitz raw text (plain characters per page),
+    # while full_text is pymupdf4llm Markdown. Markdown adds heading markers,
+    # table syntax, etc., so char counts differ slightly. Page assignment for
+    # chunks spanning page boundaries remains approximate, but is more accurate
+    # than the previous pymupdf4llm-derived offsets.
+    page_offsets = _build_fitz_page_map(path)
     return full_text, page_offsets
 
 
