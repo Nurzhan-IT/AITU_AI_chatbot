@@ -1,4 +1,5 @@
 """Generate a PDF report of duplicate/stale detection warnings (in Russian)."""
+import difflib
 import logging
 import os
 import platform
@@ -354,6 +355,46 @@ class _ReportPDF(FPDF):
             border=1, fill=True, align="L",
         )
 
+    def _chunk_box_full(self, label: str, text: str) -> None:
+        self.set_font(_FONT, "B", 9)
+        self.set_text_color(*_C_DARK)
+        self.cell(
+            _CONTENT_W, 7, label,
+            new_x=XPos.LMARGIN, new_y=YPos.NEXT,
+        )
+        self.set_font(_FONT, size=8.5)
+        self.set_fill_color(*_C_GREY_LIGHT)
+        self.set_text_color(*_C_DARK)
+        self.multi_cell(
+            _CONTENT_W, 5.5,
+            f"  {(text or '').strip()}",
+            border=1, fill=True, align="L",
+        )
+
+    def _diff_section(self, new_text: str, existing_text: str) -> None:
+        self.set_font(_FONT, "B", 10)
+        self.set_text_color(*_C_DARK)
+        self.cell(
+            _CONTENT_W, 7, "Сравнение текстов (различия выделены)",
+            new_x=XPos.LMARGIN, new_y=YPos.NEXT,
+        )
+        self.ln(2)
+        new_lines = (new_text or "").splitlines()
+        existing_lines = (existing_text or "").splitlines()
+        diff_lines = list(difflib.ndiff(existing_lines, new_lines))
+        self.set_font(_FONT, size=7.5)
+        for line in diff_lines:
+            if line.startswith("? "):
+                continue
+            if line.startswith("+ "):
+                self.set_text_color(*_C_RED)
+            elif line.startswith("- "):
+                self.set_text_color(52, 101, 164)   # blue
+            else:
+                self.set_text_color(*_C_MUTED)
+            self.multi_cell(_CONTENT_W, 5, f"  {line}", border=0, align="L")
+        self.set_text_color(*_C_DARK)
+
 
 # ---------------------------------------------------------------------------
 # Public API
@@ -376,5 +417,209 @@ async def generate_report() -> bytes:
         pdf.add_page()  # _is_cover=False at this point → header/footer active
         for idx, w in enumerate(warnings):
             pdf.warning_section(w, idx)
+
+    return bytes(pdf.output())
+
+
+async def generate_warning_report(warning_id: int) -> bytes:
+    """Generate a detailed single-warning PDF report.
+
+    Returns raw PDF bytes.
+    Raises ValueError if the warning is not found.
+    """
+    w = await repository.get_warning_by_id(warning_id)
+    if w is None:
+        raise ValueError(f"Warning #{warning_id} not found")
+
+    new_history = await repository.get_file_history(w["new_filename"], limit=5)
+    existing_history = await repository.get_file_history(w["existing_filename"], limit=5)
+
+    font_reg, font_bold = _find_fonts()
+    pdf = _ReportPDF(font_reg, font_bold)
+    pdf._is_cover = False
+    pdf.add_page()
+
+    wtype = w["warning_type"]
+    color = _C_RED if wtype == "DUPLICATE" else _C_ORANGE
+    label = "ДУБЛИКАТ" if wtype == "DUPLICATE" else "УСТАРЕВШИЕ ДАННЫЕ"
+
+    # ------------------------------------------------------------------
+    # Section 1: Header banner
+    # ------------------------------------------------------------------
+    resolved = w.get("resolved")
+    resolved_at = w.get("resolved_at")
+    status_str = (
+        (f"Решено ({_fmt_date(resolved_at)})" if resolved_at else "Решено")
+        if resolved else "Нерешённое"
+    )
+    pdf.set_fill_color(*color)
+    pdf.set_text_color(*_C_WHITE)
+    pdf.set_font(_FONT, "B", 14)
+    pdf.cell(
+        _CONTENT_W, 12,
+        f"  \u26a0 {label}  —  Предупреждение #{warning_id}",
+        fill=True, align="L",
+        new_x=XPos.LMARGIN, new_y=YPos.NEXT,
+    )
+    pdf.set_font(_FONT, size=10)
+    pdf.cell(
+        _CONTENT_W, 8,
+        f"  Статус: {status_str}",
+        fill=True, align="L",
+        new_x=XPos.LMARGIN, new_y=YPos.NEXT,
+    )
+    pdf.ln(5)
+
+    # ------------------------------------------------------------------
+    # Section 2: Metadata table
+    # ------------------------------------------------------------------
+    type_desc = (
+        "ДУБЛИКАТ — идентичное содержимое"
+        if wtype == "DUPLICATE"
+        else "УСТАРЕВШИЕ ДАННЫЕ — заменяет существующий документ"
+    )
+    pdf._meta_table(
+        [
+            ("Тип предупреждения", type_desc),
+            ("Новый документ", w["new_filename"]),
+            ("Существующий документ", w["existing_filename"]),
+            ("Степень схожести", _similarity_bar(w["similarity"])),
+            ("Дата обнаружения", _fmt_date(w["created_at"])),
+        ],
+        sim_color=color,
+    )
+    pdf.ln(5)
+
+    # ------------------------------------------------------------------
+    # Section 3: Timeline
+    # ------------------------------------------------------------------
+    def _find_upload(history: list[dict]) -> str | None:
+        for ev in reversed(history):
+            if ev.get("event") == "uploaded":
+                return ev.get("timestamp")
+        return None
+
+    existing_upload = _find_upload(existing_history)
+    new_upload = _find_upload(new_history)
+
+    if existing_upload and new_upload:
+        try:
+            d1 = datetime.fromisoformat(existing_upload.replace("Z", "+00:00"))
+            d2 = datetime.fromisoformat(new_upload.replace("Z", "+00:00"))
+            delta_str = f"{abs((d2 - d1).days)} дн."
+        except Exception:
+            delta_str = "—"
+    else:
+        delta_str = "—"
+
+    pdf.set_font(_FONT, "B", 10)
+    pdf.set_text_color(*_C_DARK)
+    pdf.cell(_CONTENT_W, 7, "Временная шкала", new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+    pdf.ln(1)
+    pdf._meta_table(
+        [
+            ("Загрузка существующего документа", _fmt_date(existing_upload) if existing_upload else "неизвестно"),
+            ("Загрузка нового документа", _fmt_date(new_upload) if new_upload else "неизвестно"),
+            ("Разница во времени", delta_str),
+        ],
+        sim_color=color,
+    )
+    pdf.ln(5)
+
+    # ------------------------------------------------------------------
+    # Section 4: AI reason (STALE only)
+    # ------------------------------------------------------------------
+    if wtype == "STALE" and w.get("llm_reason"):
+        pdf._reason_box(w["llm_reason"])
+        pdf.ln(5)
+
+    # ------------------------------------------------------------------
+    # Section 5: Visual diff
+    # ------------------------------------------------------------------
+    pdf._diff_section(w.get("new_chunk_text", ""), w.get("existing_chunk_text", ""))
+    pdf.ln(3)
+
+    # ------------------------------------------------------------------
+    # Section 6: Full chunk texts
+    # ------------------------------------------------------------------
+    pdf._chunk_box_full(
+        f"Полный текст нового фрагмента  [{w['new_filename']}]",
+        w.get("new_chunk_text", ""),
+    )
+    pdf.ln(3)
+    pdf._chunk_box_full(
+        f"Полный текст существующего фрагмента  [{w['existing_filename']}]",
+        w.get("existing_chunk_text", ""),
+    )
+    pdf.ln(5)
+
+    # ------------------------------------------------------------------
+    # Section 7: Document history
+    # ------------------------------------------------------------------
+    pdf.set_font(_FONT, "B", 10)
+    pdf.set_text_color(*_C_DARK)
+    pdf.cell(_CONTENT_W, 7, "История документов", new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+    pdf.ln(2)
+
+    _EV_ICON = {"uploaded": "\u2b06", "deleted": "\u2715"}
+    for hist_label, history in [
+        (f"История: {w['new_filename']}", new_history),
+        (f"История: {w['existing_filename']}", existing_history),
+    ]:
+        pdf.set_font(_FONT, "B", 9)
+        pdf.set_text_color(*_C_DARK)
+        pdf.cell(_CONTENT_W, 6, hist_label, new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+        if history:
+            for ev in history:
+                icon = _EV_ICON.get(ev.get("event", ""), "\u2022")
+                ev_date = _fmt_date(ev.get("timestamp", ""))
+                chunks = ev.get("chunk_count", 0)
+                ev_type = ev.get("event", "")
+                pdf.set_font(_FONT, size=8.5)
+                pdf.set_fill_color(*_C_GREY_LIGHT)
+                pdf.set_text_color(*_C_DARK)
+                pdf.cell(
+                    _CONTENT_W, 6,
+                    f"  {icon}  {ev_date}  |  {ev_type}  |  чанков: {chunks}",
+                    border="B", fill=True,
+                    new_x=XPos.LMARGIN, new_y=YPos.NEXT,
+                )
+        else:
+            pdf.set_font(_FONT, size=8.5)
+            pdf.set_text_color(*_C_MUTED)
+            pdf.cell(
+                _CONTENT_W, 6, "  История не найдена",
+                new_x=XPos.LMARGIN, new_y=YPos.NEXT,
+            )
+        pdf.ln(3)
+
+    pdf.ln(2)
+
+    # ------------------------------------------------------------------
+    # Section 8: Recommended action
+    # ------------------------------------------------------------------
+    rec_color = _C_RED if wtype == "DUPLICATE" else _C_ORANGE
+    rec_text = (
+        "Рекомендуется удалить новый документ как дубликат"
+        if wtype == "DUPLICATE"
+        else "Рекомендуется заменить существующий документ новым"
+    )
+    pdf.set_fill_color(*rec_color)
+    pdf.set_text_color(*_C_WHITE)
+    pdf.set_font(_FONT, "B", 11)
+    pdf.cell(
+        _CONTENT_W, 10, f"  {rec_text}",
+        fill=True, align="L",
+        new_x=XPos.LMARGIN, new_y=YPos.NEXT,
+    )
+    pdf.set_fill_color(*_C_GREY_LIGHT)
+    pdf.set_text_color(*_C_DARK)
+    pdf.set_font(_FONT, size=9)
+    pdf.multi_cell(
+        _CONTENT_W, 6,
+        f"  /resolve {warning_id} — закрыть предупреждение\n"
+        f"  /delete {w['new_filename']} — удалить документ",
+        border=1, fill=True, align="L",
+    )
 
     return bytes(pdf.output())

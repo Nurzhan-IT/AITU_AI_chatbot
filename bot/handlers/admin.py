@@ -217,10 +217,8 @@ async def _get_warnings_content(page: int) -> tuple[str, InlineKeyboardMarkup]:
             lines.append(f"  Причина: {row['llm_reason']}")
         lines.append("")
         keyboard_rows.append([
-            InlineKeyboardButton(
-                text=f"✅ Закрыть #{row['id']}",
-                callback_data=f"resolve:{row['id']}",
-            )
+            InlineKeyboardButton(text=f"✅ Закрыть #{row['id']}", callback_data=f"resolve:{row['id']}"),
+            InlineKeyboardButton(text="📄 Репорт", callback_data=f"report:{row['id']}"),
         ])
 
     # Navigation row
@@ -506,7 +504,27 @@ async def cmd_stats(message: Message) -> None:
 
 @router.message(Command("report"))
 async def cmd_report(message: Message) -> None:
-    await _report_handler(message)
+    parts = (message.text or "").split()
+    if len(parts) > 1 and parts[1].isdigit():
+        warning_id = int(parts[1])
+        status = await message.answer(f"⏳ Генерирую PDF-отчёт для #{warning_id}...")
+        try:
+            from duplicate_detection.report_generator import generate_warning_report
+            pdf_bytes = await generate_warning_report(warning_id)
+            ts = datetime.now(TZ_UTC5).strftime("%Y%m%d_%H%M")
+            await message.answer_document(
+                BufferedInputFile(pdf_bytes, f"warning_{warning_id}_{ts}.pdf"),
+                caption=f"📊 Подробный отчёт по предупреждению #{warning_id}",
+            )
+        except ValueError as exc:
+            await message.answer(f"⚠️ {exc}")
+        except Exception as exc:
+            logger.error("Per-warning report failed for #%d: %s", warning_id, exc)
+            await message.answer(f"❌ Ошибка генерации отчёта: {exc}")
+        finally:
+            await status.delete()
+    else:
+        await _report_handler(message)
 
 
 # ---------------------------------------------------------------------------
@@ -672,6 +690,29 @@ async def cb_warnings_page(callback: CallbackQuery) -> None:
 @router.callback_query(F.data == "noop")
 async def cb_noop(callback: CallbackQuery) -> None:
     await callback.answer()
+
+
+@router.callback_query(F.data.startswith("report:"))
+async def cb_warning_report(callback: CallbackQuery, bot: Bot) -> None:
+    warning_id = int(callback.data.split(":")[1])
+    await callback.answer()
+    status = await callback.message.answer(f"⏳ Генерирую PDF-отчёт для #{warning_id}...")
+    try:
+        from duplicate_detection.report_generator import generate_warning_report
+        pdf_bytes = await generate_warning_report(warning_id)
+        ts = datetime.now(TZ_UTC5).strftime("%Y%m%d_%H%M")
+        await bot.send_document(
+            callback.message.chat.id,
+            BufferedInputFile(pdf_bytes, f"warning_{warning_id}_{ts}.pdf"),
+            caption=f"📊 Подробный отчёт по предупреждению #{warning_id}",
+        )
+    except ValueError as exc:
+        await callback.message.answer(f"⚠️ {exc}")
+    except Exception as exc:
+        logger.error("Per-warning report failed for #%d: %s", warning_id, exc)
+        await callback.message.answer(f"❌ Ошибка генерации отчёта: {exc}")
+    finally:
+        await status.delete()
 
 
 @router.callback_query(F.data.startswith("resolve:"))

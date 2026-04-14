@@ -92,6 +92,23 @@ async def create_warning(
         return cursor.lastrowid  # type: ignore[return-value]
 
 
+async def get_warning_by_id(warning_id: int) -> dict | None:
+    async with aiosqlite.connect(_get_path()) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            """
+            SELECT id, warning_type, new_filename, existing_filename,
+                   new_chunk_text, existing_chunk_text,
+                   similarity, llm_reason, resolved, resolved_at, created_at
+            FROM warnings
+            WHERE id = ?
+            """,
+            (warning_id,),
+        )
+        row = await cursor.fetchone()
+    return dict(row) if row is not None else None
+
+
 async def list_warnings(
     resolved: bool = False,
     limit: int = 5,

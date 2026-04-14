@@ -37,7 +37,7 @@ async def send_upload_warnings(
         lines.append(f"<b>🔁 ДУБЛИКАТЫ ({len(duplicates)}):</b>")
         for w in duplicates:
             lines.append(
-                f"• Совпадает с <code>{w['existing_filename']}</code> "
+                f"• [#{w['id']}] Совпадает с <code>{w['existing_filename']}</code> "
                 f"— {w['similarity']:.0%}"
             )
             lines.append(f"  «{_snippet(w['new_chunk_text'])}»")
@@ -47,7 +47,7 @@ async def send_upload_warnings(
         lines.append(f"<b>📅 УСТАРЕВШИЕ ({len(stale)}):</b>")
         for w in stale:
             lines.append(
-                f"• Похоже, заменяет <code>{w['existing_filename']}</code> "
+                f"• [#{w['id']}] Похоже, заменяет <code>{w['existing_filename']}</code> "
                 f"— {w['similarity']:.0%}"
             )
             if w.get("llm_reason"):
