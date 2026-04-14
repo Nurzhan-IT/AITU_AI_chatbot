@@ -1,7 +1,6 @@
 import asyncio
 import logging
 import math
-import uuid
 from datetime import datetime
 from difflib import SequenceMatcher
 from pathlib import Path
@@ -26,7 +25,6 @@ router = Router()
 
 _PDFS_DIR = Path("pdfs")
 _WARNINGS_PAGE_SIZE = 5
-_replace_store: dict[str, tuple[str, str]] = {}  # uuid_key → (new_name, old_name)
 
 
 def _find_similar_filename(new_name: str, existing_names: list[str], threshold: float = 0.6) -> str | None:
@@ -152,26 +150,6 @@ async def cmd_upload(message: Message, bot: Bot) -> None:
             f"Загружено чанков: <b>{n_chunks}</b>\n{suffix}",
             parse_mode="HTML",
         )
-
-        # Send inline replace-confirmation for each STALE warning
-        for w in found:
-            if w.get("warning_type") == "STALE":
-                key = str(uuid.uuid4())
-                _replace_store[key] = (w["new_filename"], w["existing_filename"])
-                markup = InlineKeyboardMarkup(inline_keyboard=[[
-                    InlineKeyboardButton(text="✅ Да, заменить", callback_data=f"confirm_replace:{key}"),
-                    InlineKeyboardButton(text="❌ Пропустить",   callback_data=f"skip_replace:{key}"),
-                ]])
-                try:
-                    await bot.send_message(
-                        settings.admin_telegram_id,
-                        f"🔄 <b>{w['new_filename']}</b> похоже заменяет "
-                        f"<b>{w['existing_filename']}</b>.\nЗаписать связь замены?",
-                        parse_mode="HTML",
-                        reply_markup=markup,
-                    )
-                except Exception as e:
-                    logger.warning("Failed to send replace prompt: %s", e)
 
     asyncio.create_task(_run_ingest())
 
@@ -714,29 +692,3 @@ async def cb_resolve(callback: CallbackQuery) -> None:
         pass  # "message is not modified" — ignore
 
 
-# ---------------------------------------------------------------------------
-# Inline callbacks — confirm / skip replace
-# ---------------------------------------------------------------------------
-
-@router.callback_query(F.data.startswith("confirm_replace:"))
-async def cb_confirm_replace(callback: CallbackQuery) -> None:
-    key = callback.data.split(":", maxsplit=1)[1]
-    pair = _replace_store.pop(key, None)
-    if not pair:
-        await callback.answer("Запись уже обработана.", show_alert=True)
-        return
-    new_name, old_name = pair
-    await repository.record_file_event(new_name, new_name, "uploaded", 0, replaces_filename=old_name)
-    await callback.message.edit_text(
-        f"✅ Записано: <code>{new_name}</code> заменяет <code>{old_name}</code>.",
-        parse_mode="HTML",
-    )
-    await callback.answer()
-
-
-@router.callback_query(F.data.startswith("skip_replace:"))
-async def cb_skip_replace(callback: CallbackQuery) -> None:
-    key = callback.data.split(":", maxsplit=1)[1]
-    _replace_store.pop(key, None)
-    await callback.message.edit_text("ℹ️ Связь с предыдущей версией не записана.")
-    await callback.answer()
