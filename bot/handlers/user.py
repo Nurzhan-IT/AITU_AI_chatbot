@@ -8,8 +8,16 @@ from aiogram import F, Router
 from aiogram.filters import Command
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, Message
 
+from bot.faq_repository import (
+    get_all_faq,
+    get_faq_last_updated,
+    is_user_notified,
+    mark_user_notified,
+    register_user,
+)
 from bot.handlers.feedback import feedback_keyboard, log_query
 from bot.keyboards.admin import admin_keyboard
+from bot.keyboards.user import user_keyboard
 from config import settings
 from rag.generator import Generator
 from rag.retriever import Retriever
@@ -60,6 +68,19 @@ _HELP_TEXT = (
 MAX_TG_LEN = 4000
 
 
+async def _check_and_send_faq_notification(message: Message) -> None:
+    if not message.from_user:
+        return
+    user_id = message.from_user.id
+    notified = await is_user_notified(user_id)
+    if not notified:
+        await message.answer(
+            "📢 FAQ был обновлён! Нажмите кнопку «FAQ» в меню, "
+            "чтобы ознакомиться с актуальной версией."
+        )
+        await mark_user_notified(user_id)
+
+
 async def send_long_message(message, text: str, reply_markup=None):
     if len(text) <= MAX_TG_LEN:
         await message.answer(text, reply_markup=reply_markup)
@@ -85,7 +106,8 @@ async def cmd_start(message: Message) -> None:
     if message.from_user and message.from_user.id == settings.admin_telegram_id:
         await message.answer(_START_TEXT, reply_markup=admin_keyboard())
     else:
-        await message.answer(_START_TEXT)
+        await message.answer(_START_TEXT, reply_markup=user_keyboard())
+        await register_user(message.from_user.id)
 
 
 @router.message(Command("help"))
@@ -94,11 +116,40 @@ async def cmd_help(message: Message) -> None:
 
 
 # ---------------------------------------------------------------------------
+# FAQ button
+# ---------------------------------------------------------------------------
+
+@router.message(F.text == "📖 FAQ")
+async def handle_faq_button(message: Message) -> None:
+    await _check_and_send_faq_notification(message)
+    entries = await get_all_faq()
+    if not entries:
+        await message.answer("📭 FAQ пока пуст.")
+        return
+    last_updated = await get_faq_last_updated()
+    try:
+        formatted_date = datetime.fromisoformat(last_updated).strftime("%d.%m.%Y %H:%M")
+    except (TypeError, ValueError):
+        formatted_date = "—"
+    await message.answer(
+        f"📖 <b>FAQ</b>\n🕐 Последнее обновление: {formatted_date}",
+        parse_mode="HTML",
+    )
+    for entry in entries:
+        await message.answer(
+            f"❓ <b>{entry['question']}</b>\n\n💬 {entry['answer']}",
+            parse_mode="HTML",
+        )
+
+
+# ---------------------------------------------------------------------------
 # Text → RAG pipeline
 # ---------------------------------------------------------------------------
 
 @router.message(F.text)
 async def handle_question(message: Message) -> None:
+    await _check_and_send_faq_notification(message)
+
     question = (message.text or "").strip()
     if not question:
         return

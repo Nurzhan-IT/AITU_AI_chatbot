@@ -115,6 +115,19 @@ async def init_db(db_path: str = "data/bot.db", log_path: str = "duplicate_detec
             CREATE INDEX IF NOT EXISTS idx_query_logs_user     ON query_logs(user_id);
             CREATE INDEX IF NOT EXISTS idx_query_logs_ts       ON query_logs(timestamp);
             CREATE INDEX IF NOT EXISTS idx_query_logs_feedback ON query_logs(feedback);
+
+            CREATE TABLE IF NOT EXISTS faq (
+                id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                question   TEXT    NOT NULL,
+                answer     TEXT    NOT NULL,
+                created_at TEXT    NOT NULL,
+                updated_at TEXT    NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS users (
+                user_id                            INTEGER PRIMARY KEY,
+                is_been_notified_about_faq_update  INTEGER NOT NULL DEFAULT 1
+            );
         """)
         await db.commit()
 

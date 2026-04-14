@@ -6,9 +6,10 @@ from datetime import datetime
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
+from aiogram.fsm.storage.memory import MemoryStorage
 
 from config import settings, TZ_UTC5
-from bot.handlers import admin, user
+from bot.handlers import admin, admin_faq, user
 from bot.handlers.feedback import router as feedback_router
 from rag.retriever import Retriever
 
@@ -46,7 +47,7 @@ async def main() -> None:
         default=DefaultBotProperties(parse_mode=ParseMode.HTML),
     )
 
-    dp = Dispatcher()
+    dp = Dispatcher(storage=MemoryStorage())
 
     dp.startup.register(on_startup)
     dp.shutdown.register(on_shutdown)
@@ -54,6 +55,7 @@ async def main() -> None:
     # Admin router must be registered first — its filter rejects non-admins
     # before user router's catch-all F.text handler sees the message
     dp.include_router(admin.router)
+    dp.include_router(admin_faq.router)
     dp.include_router(feedback_router)
     dp.include_router(user.router)
 
