@@ -1,6 +1,11 @@
+import asyncio
 import logging
+import shutil
+import subprocess
+import tempfile
 from collections import defaultdict
 from datetime import datetime
+from pathlib import Path
 from time import time
 from urllib.parse import quote, urlsplit, urlunsplit
 
@@ -140,6 +145,132 @@ async def handle_faq_button(message: Message) -> None:
             f"❓ <b>{entry['question']}</b>\n\n💬 {entry['answer']}",
             parse_mode="HTML",
         )
+
+
+# ---------------------------------------------------------------------------
+# .docx / .doc → extract text → RAG pipeline
+# ---------------------------------------------------------------------------
+
+def _extract_docx(path: Path) -> str:
+    from docx import Document  # noqa: PLC0415
+    doc = Document(str(path))
+    return "\n".join(para.text for para in doc.paragraphs if para.text.strip())
+
+
+def _extract_doc_antiword(path: Path) -> str:
+    result = subprocess.run(
+        ["antiword", str(path)],
+        capture_output=True, text=True, timeout=30,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(result.stderr.strip() or "antiword failed")
+    return result.stdout
+
+
+@router.message(F.document)
+async def handle_document(message: Message) -> None:
+    doc = message.document
+    if not doc or not doc.file_name:
+        return
+
+    name_lower = doc.file_name.lower()
+    if not (name_lower.endswith(".docx") or name_lower.endswith(".doc")):
+        return  # ignore other file types silently
+
+    await _check_and_send_faq_notification(message)
+
+    user_id = message.from_user.id if message.from_user else 0
+    if _is_rate_limited(user_id):
+        await message.answer("⏳ Слишком много запросов. Пожалуйста, подождите немного.")
+        return
+
+    status_msg = await message.answer("📥 Читаю файл...")
+
+    suffix = ".docx" if name_lower.endswith(".docx") else ".doc"
+    tmp_fd, tmp_name = tempfile.mkstemp(suffix=suffix)
+    tmp_path = Path(tmp_name)
+    try:
+        import os; os.close(tmp_fd)
+
+        try:
+            await message.bot.download(doc, destination=tmp_path)
+        except Exception as e:
+            logger.error("Failed to download document from user %s: %s", user_id, e)
+            await status_msg.edit_text("❌ Не удалось скачать файл.")
+            return
+
+        loop = asyncio.get_running_loop()
+        if name_lower.endswith(".docx"):
+            try:
+                question = await loop.run_in_executor(None, _extract_docx, tmp_path)
+            except Exception as e:
+                logger.error("Failed to extract .docx from user %s: %s", user_id, e)
+                await status_msg.edit_text("❌ Не удалось прочитать файл .docx.")
+                return
+        else:
+            if not shutil.which("antiword"):
+                await status_msg.edit_text(
+                    "❌ Формат .doc не поддерживается.\n"
+                    "Пожалуйста, конвертируйте файл в .docx и попробуйте снова."
+                )
+                return
+            try:
+                question = await loop.run_in_executor(None, _extract_doc_antiword, tmp_path)
+            except Exception as e:
+                logger.error("Failed to extract .doc from user %s: %s", user_id, e)
+                await status_msg.edit_text("❌ Не удалось прочитать файл .doc.")
+                return
+    finally:
+        tmp_path.unlink(missing_ok=True)
+
+    question = question.strip()
+    if not question:
+        await status_msg.edit_text("❌ Файл не содержит текста.")
+        return
+
+    await status_msg.edit_text("✅ Файл прочитан. Ищу информацию...")
+
+    try:
+        chunks = await _retriever.search(question)
+    except Exception as e:
+        logger.error("Retrieval failed for user %s: %s", user_id, e)
+        await status_msg.edit_text("😔 Не удалось выполнить поиск. Попробуйте позже.")
+        return
+
+    try:
+        result = await _generator.generate(question, chunks)
+    except Exception as e:
+        logger.error("Generation failed for user %s: %s", user_id, e)
+        await status_msg.edit_text("😔 Не удалось сформировать ответ. Попробуйте позже.")
+        return
+
+    log_id = await log_query(
+        user_id=user_id,
+        query=question,
+        detected_lang=result["detected_lang"],
+        chunks=chunks,
+        answer=result["answer"],
+        sources=result["sources"],
+    )
+
+    text = f"💬 {result['answer']}"
+    sources = result["sources"]
+    if sources:
+        text += "\n\n📄 Источники:\n"
+        text += _build_sources_text(sources)
+    text += "\n\n" + _disclaimer(result["detected_lang"])
+
+    keyboard = _build_keyboard(sources)
+    if len(text) <= MAX_TG_LEN:
+        fb_kb = feedback_keyboard(log_id)
+        combined = (
+            InlineKeyboardMarkup(inline_keyboard=keyboard.inline_keyboard + fb_kb.inline_keyboard)
+            if keyboard else fb_kb
+        )
+        await status_msg.edit_text(text, reply_markup=combined)
+    else:
+        await status_msg.delete()
+        await send_long_message(message, text, reply_markup=feedback_keyboard(log_id))
 
 
 # ---------------------------------------------------------------------------

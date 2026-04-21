@@ -12,3 +12,4 @@ aiosqlite==0.20.0
 fpdf2==2.7.9
 langdetect==1.0.9
 numpy
+python-docx==1.1.2
