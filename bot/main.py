@@ -9,6 +9,7 @@ from aiogram.enums import ParseMode
 from aiogram.fsm.storage.memory import MemoryStorage
 
 from config import settings, TZ_UTC5
+from bot.auth.handler import router as auth_router
 from bot.handlers import admin, admin_faq, user
 from bot.handlers.feedback import router as feedback_router
 from rag.retriever import Retriever
@@ -52,8 +53,9 @@ async def main() -> None:
     dp.startup.register(on_startup)
     dp.shutdown.register(on_shutdown)
 
-    # Admin router must be registered first — its filter rejects non-admins
-    # before user router's catch-all F.text handler sees the message
+    # Auth router first — intercepts unverified users before any other handler
+    dp.include_router(auth_router)
+    # Admin router must be registered before user — its filter rejects non-admins
     dp.include_router(admin.router)
     dp.include_router(admin_faq.router)
     dp.include_router(feedback_router)

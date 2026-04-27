@@ -50,11 +50,7 @@ def _is_admin(message: Message) -> bool:
 
 
 async def _admin_filter(message: Message) -> bool:
-    if _is_admin(message):
-        return True
-    await message.answer("⛔ Доступ запрещён.")
-    logger.warning("Unauthorized admin access attempt from user_id=%s", message.from_user and message.from_user.id)
-    return False
+    return _is_admin(message)
 
 
 async def _admin_callback_filter(callback: CallbackQuery) -> bool:

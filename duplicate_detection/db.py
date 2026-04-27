@@ -99,6 +99,22 @@ async def init_db(db_path: str = "data/bot.db", log_path: str = "duplicate_detec
                 pass  # Column already exists
         await db.commit()
 
+        # Email verification columns for users table (idempotent)
+        for col, definition in [
+            ("email",                    "TEXT"),
+            ("is_verified",              "INTEGER NOT NULL DEFAULT 0"),
+            ("verification_code",        "TEXT"),
+            ("verification_expires_at",  "TEXT"),
+            ("verification_attempts",    "INTEGER NOT NULL DEFAULT 0"),
+        ]:
+            try:
+                await db.execute(
+                    f"ALTER TABLE users ADD COLUMN {col} {definition}"
+                )
+            except Exception:
+                pass  # Column already exists
+        await db.commit()
+
         await db.executescript("""
 
             CREATE TABLE IF NOT EXISTS query_logs (

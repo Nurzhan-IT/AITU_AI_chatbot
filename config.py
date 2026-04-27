@@ -45,5 +45,10 @@ class Settings(BaseSettings):
     sqlite_db_path: str = "data/bot.db"
     duplicate_detection_log: str = "duplicate_detection.log"
 
+    # Brevo (email verification)
+    brevo_api_key: str = ""
+    brevo_sender_email: str = ""
+    brevo_sender_name: str = "AITU Bot"
+
 
 settings = Settings()
