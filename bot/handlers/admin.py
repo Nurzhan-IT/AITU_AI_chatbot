@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import logging
 import math
 from datetime import datetime
@@ -25,6 +26,22 @@ router = Router()
 
 _PDFS_DIR = Path("pdfs")
 _WARNINGS_PAGE_SIZE = 5
+
+
+def _filename_key(filename: str) -> str:
+    return hashlib.md5(filename.encode()).hexdigest()[:8]
+
+
+async def _filename_from_key(key: str) -> str | None:
+    retriever = Retriever()
+    try:
+        docs = await retriever.get_all_documents()
+    except Exception:
+        return None
+    for doc in docs:
+        if _filename_key(doc["filename"]) == key:
+            return doc["filename"]
+    return None
 
 
 def _find_similar_filename(new_name: str, existing_names: list[str], threshold: float = 0.6) -> str | None:
@@ -56,7 +73,6 @@ async def _admin_filter(message: Message) -> bool:
 async def _admin_callback_filter(callback: CallbackQuery) -> bool:
     if callback.from_user is not None and callback.from_user.id == settings.admin_telegram_id:
         return True
-    await callback.answer("⛔ Доступ запрещён.", show_alert=True)
     logger.warning("Unauthorized admin callback attempt from user_id=%s", callback.from_user and callback.from_user.id)
     return False
 
@@ -172,9 +188,10 @@ async def _get_list_content() -> tuple[str, InlineKeyboardMarkup | None]:
             f"{i}. <b>{doc['doc_title']}</b>\n"
             f"   📄 <code>{doc['filename']}</code>"
         )
+        key = _filename_key(doc["filename"])
         keyboard_rows.append([
-            InlineKeyboardButton(text="🗑️ Удалить",  callback_data=f"delete_ask:{doc['filename']}"),
-            InlineKeyboardButton(text="📜 История", callback_data=f"history:{doc['filename']}"),
+            InlineKeyboardButton(text=f"🗑️ Удалить #{i}",  callback_data=f"delete_ask:{key}"),
+            InlineKeyboardButton(text=f"📜 История #{i}", callback_data=f"history:{key}"),
         ])
 
     return "\n".join(lines), InlineKeyboardMarkup(inline_keyboard=keyboard_rows)
@@ -214,7 +231,7 @@ async def _get_warnings_content(page: int) -> tuple[str, InlineKeyboardMarkup]:
         lines.append("")
         keyboard_rows.append([
             InlineKeyboardButton(text=f"✅ Закрыть #{row['id']}", callback_data=f"resolve:{row['id']}"),
-            InlineKeyboardButton(text="📄 Репорт", callback_data=f"report:{row['id']}"),
+            InlineKeyboardButton(text=f"📄 Репорт #{row['id']}", callback_data=f"report:{row['id']}"),
         ])
 
     # Navigation row
@@ -563,10 +580,14 @@ async def btn_upload(message: Message) -> None:
 
 @router.callback_query(F.data.startswith("delete_ask:"))
 async def cb_delete_ask(callback: CallbackQuery) -> None:
-    filename = callback.data.split(":", maxsplit=1)[1]
+    key = callback.data.split(":", maxsplit=1)[1]
+    filename = await _filename_from_key(key)
+    if not filename:
+        await callback.answer("❌ Документ не найден.", show_alert=True)
+        return
     markup = InlineKeyboardMarkup(inline_keyboard=[[
-        InlineKeyboardButton(text="✅ Подтвердить удаление", callback_data=f"delete_confirm:{filename}"),
-        InlineKeyboardButton(text="❌ Отмена",               callback_data=f"delete_cancel:{filename}"),
+        InlineKeyboardButton(text="✅ Подтвердить удаление", callback_data=f"delete_confirm:{key}"),
+        InlineKeyboardButton(text="❌ Отмена",               callback_data=f"delete_cancel:{key}"),
     ]])
     await callback.message.edit_text(
         f"🗑️ Удалить <code>{filename}</code>? Это действие необратимо.",
@@ -578,7 +599,11 @@ async def cb_delete_ask(callback: CallbackQuery) -> None:
 
 @router.callback_query(F.data.startswith("delete_confirm:"))
 async def cb_delete_confirm(callback: CallbackQuery) -> None:
-    filename = callback.data.split(":", maxsplit=1)[1]
+    key = callback.data.split(":", maxsplit=1)[1]
+    filename = await _filename_from_key(key)
+    if not filename:
+        await callback.answer("❌ Документ не найден.", show_alert=True)
+        return
 
     retriever = Retriever()
     try:
@@ -624,7 +649,11 @@ async def cb_delete_cancel(callback: CallbackQuery) -> None:
 
 @router.callback_query(F.data.startswith("history:"))
 async def cb_history(callback: CallbackQuery) -> None:
-    filename = callback.data.split(":", maxsplit=1)[1]
+    key = callback.data.split(":", maxsplit=1)[1]
+    filename = await _filename_from_key(key)
+    if not filename:
+        await callback.answer("❌ Документ не найден.", show_alert=True)
+        return
 
     rows = await repository.get_file_history(filename=filename, limit=10)
 

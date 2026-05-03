@@ -40,7 +40,6 @@ async def _admin_filter(message: Message) -> bool:
 async def _admin_callback_filter(callback: CallbackQuery) -> bool:
     if callback.from_user is not None and callback.from_user.id == settings.admin_telegram_id:
         return True
-    await callback.answer("⛔ Доступ запрещён.", show_alert=True)
     logger.warning("Unauthorized admin callback attempt from user_id=%s", callback.from_user and callback.from_user.id)
     return False
 
