@@ -19,8 +19,19 @@ class Settings(BaseSettings):
     llm_model: str = "llama-3.3-70b-versatile"
     groq_api_key: str = ""
 
-    # OpenRouter (used only when llm_provider == "openrouter")
+    # OpenRouter
     openrouter_api_key: str = ""
+    openrouter_base_url: str = "https://openrouter.ai/api/v1"
+
+    # Vision models (overridable via .env)
+    vision_model_primary: str = "google/gemini-2.0-flash-001"
+    vision_model_fallback: str = "google/gemini-2.5-flash-preview"
+
+    # Page classifier thresholds
+    scan_text_threshold: int = 100
+    scan_image_ratio: float = 0.70
+    vision_min_image_bytes: int = 10_240
+    page_render_dpi: int = 300
 
     # Embeddings
     embedding_model: str = "intfloat/multilingual-e5-large"

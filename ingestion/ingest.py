@@ -1,5 +1,6 @@
 import argparse
 import asyncio
+import bisect
 import logging
 import re
 import uuid
@@ -11,6 +12,9 @@ from urllib.parse import quote
 import pymupdf4llm
 import fitz                  # PyMuPDF raw text extraction for accurate page offsets
 import tiktoken
+from ingestion.page_classifier import classify_document, PageType
+from ingestion.page_processor import process_page
+from ingestion.post_processor import postprocess
 from qdrant_client import AsyncQdrantClient
 from qdrant_client.models import Distance, PointStruct, VectorParams
 
@@ -36,7 +40,7 @@ _PARAGRAPH_RE = re.compile(r'(?=^\s{0,4}\d{1,3}[\.\)]\s)', re.MULTILINE)
 # Parse
 # ---------------------------------------------------------------------------
 
-def _build_fitz_page_map(filepath: str | Path) -> dict[int, int]:
+def build_fitz_page_map(filepath: str | Path) -> dict[int, int]:
     """Build char-offset → page-number map using fitz raw text.
 
     Returns a dict where each key is the cumulative character offset at the
@@ -56,23 +60,28 @@ def _build_fitz_page_map(filepath: str | Path) -> dict[int, int]:
     return page_map
 
 
-def parse_pdf(filepath: str | Path) -> tuple[str, dict[int, int]]:
-    """Return (markdown_text, page_char_offsets).
+def parse_pdf(pdf_path: str) -> str:
+    doc = fitz.open(pdf_path)
+    classifications = classify_document(pdf_path)
 
-    page_char_offsets maps page_number → char offset where that page starts,
-    so we can approximate which page a chunk belongs to.
-    """
-    path = Path(filepath)
-    pages: list[dict] = pymupdf4llm.to_markdown(str(path), page_chunks=True)
+    # Single pymupdf4llm call for all non-SCAN pages
+    non_scan = [pn for pn, pt in classifications if pt != PageType.SCAN]
+    if non_scan:
+        full_md = pymupdf4llm.to_markdown(pdf_path, pages=non_scan)
+        sections = re.split(r'\n-----\n', full_md)
+        while len(sections) < len(non_scan):
+            sections.append("")
+        pre_md_map: dict[int, str] = dict(zip(non_scan, sections))
+    else:
+        pre_md_map = {}
 
-    full_text = "".join(page.get("text", "") for page in pages)
-    # NOTE: page_offsets is built from fitz raw text (plain characters per page),
-    # while full_text is pymupdf4llm Markdown. Markdown adds heading markers,
-    # table syntax, etc., so char counts differ slightly. Page assignment for
-    # chunks spanning page boundaries remains approximate, but is more accurate
-    # than the previous pymupdf4llm-derived offsets.
-    page_offsets = _build_fitz_page_map(path)
-    return full_text, page_offsets
+    pages: list[tuple[int, str]] = []
+    for page_num, page_type in classifications:
+        page = doc[page_num]
+        markdown = process_page(page, page_type, pre_md_map.get(page_num, ""), doc)
+        pages.append((page_num + 1, markdown))
+    doc.close()
+    return postprocess(pages)
 
 
 # ---------------------------------------------------------------------------
@@ -125,6 +134,7 @@ def _add_chunk(
         "paragraph_range": para_range or "",
         "page": page,
         "page_end": page_end,
+        "char_offset": char_offset,
     })
 
 
@@ -147,6 +157,7 @@ def _token_chunks_fallback(
             "paragraph_range": "",
             "page": page,
             "page_end": page_end,
+            "char_offset": char_offset,
         })
         char_offset += len(raw)
     return result
@@ -310,11 +321,21 @@ async def ingest_pdf(
     url = f"{settings.pdf_base_url.rstrip('/')}/{quote(filename)}"
 
     logger.info("Parsing '%s'...", filename)
-    text, page_offsets = parse_pdf(path)
+    text = parse_pdf(str(path))
+    page_offsets = build_fitz_page_map(path)
+
+    _marker_re = re.compile(r'<!-- page: (\d+) -->')
+    _marker_pairs = [(m.start(), int(m.group(1))) for m in _marker_re.finditer(text)]
+    _marker_offsets = [pos for pos, _ in _marker_pairs]
+    _marker_pages = [pnum for _, pnum in _marker_pairs]
+
     await _notify(progress_cb, "⚙️ Разбиваю на чанки...")
 
     chunks = chunk_by_sections(text, page_offsets, settings.chunk_size, settings.chunk_overlap)
     logger.info("Split into %d chunks", len(chunks))
+
+    clean_texts = [re.sub(r'<!--.*?-->', '', c["text"]).strip() for c in chunks]
+
     await _notify(progress_cb, f"🔢 Создаю эмбеддинги для {len(chunks)} фрагментов...")
 
     embedder = Embedder()
@@ -327,6 +348,8 @@ async def ingest_pdf(
     uploaded_at = datetime.now(TZ_UTC5).isoformat()
 
     for chunk_index, chunk in enumerate(chunks):
+        idx = bisect.bisect_right(_marker_offsets, chunk["char_offset"]) - 1
+        page_number = _marker_pages[idx] if idx >= 0 and _marker_pages else 1
         points.append(
             PointStruct(
                 id=str(uuid.uuid4()),
@@ -341,14 +364,14 @@ async def ingest_pdf(
                     "chunk_index": chunk_index,
                     "section_title": chunk["section_title"],
                     "paragraph_range": chunk["paragraph_range"],
-                    "text": chunk["text"],
+                    "text": clean_texts[chunk_index],
+                    "page_number": page_number,
                 },
             )
         )
 
     logger.info("Embedding %d chunks...", len(chunks))
-    chunk_texts = [c["text"] for c in chunks]
-    vectors = await embedder.embed_passages(chunk_texts)
+    vectors = await embedder.embed_passages(clean_texts)
     await _notify(progress_cb, "💾 Сохраняю в базу...")
 
     for point, vector in zip(points, vectors):

@@ -129,7 +129,7 @@ def _make_llm_client() -> Any:
         from openai import AsyncOpenAI
         return AsyncOpenAI(
             api_key=settings.openrouter_api_key,
-            base_url="https://openrouter.ai/api/v1",
+            base_url=settings.openrouter_base_url,
         )
 
 

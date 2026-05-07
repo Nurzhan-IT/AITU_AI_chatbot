@@ -14,7 +14,7 @@ def _get_client() -> AsyncOpenAI:
     global _client
     if _client is None:
         _client = AsyncOpenAI(
-            base_url="https://openrouter.ai/api/v1",
+            base_url=settings.openrouter_base_url,
             api_key=settings.openrouter_api_key,
         )
     return _client

@@ -10,7 +10,7 @@ from qdrant_client import AsyncQdrantClient
 from qdrant_client.models import Filter, FieldCondition, MatchValue
 
 from config import settings
-from ingestion.ingest import parse_pdf, chunk_by_sections
+from ingestion.ingest import parse_pdf, build_fitz_page_map, chunk_by_sections
 from rag.embedder import Embedder
 from duplicate_detection import repository, notifier
 
@@ -173,7 +173,8 @@ async def _run_analysis(
     # 1. Re-parse + chunk
     # ------------------------------------------------------------------
     logger.debug("Step 1: Parsing PDF '%s'…", filepath)
-    text, page_offsets = parse_pdf(filepath)
+    text = parse_pdf(filepath)
+    page_offsets = build_fitz_page_map(filepath)
     logger.debug(
         "Parsed: %d chars of markdown, %d page offset entries.",
         len(text), len(page_offsets),
