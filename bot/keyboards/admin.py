@@ -6,7 +6,7 @@ def admin_keyboard() -> ReplyKeyboardMarkup:
         keyboard=[
             [KeyboardButton(text="📋 Документы"),  KeyboardButton(text="⚠️ Предупреждения")],
             [KeyboardButton(text="🩺 Состояние"),  KeyboardButton(text="📊 Статистика"),  KeyboardButton(text="📄 Отчёт")],
-            [KeyboardButton(text="📖 FAQ")],
+            [KeyboardButton(text="📖 FAQ"), KeyboardButton(text="🤖 AI FAQ")],
             [KeyboardButton(text="📤 Загрузить")],
         ],
         resize_keyboard=True,

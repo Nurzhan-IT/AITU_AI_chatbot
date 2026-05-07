@@ -16,6 +16,7 @@ from aiogram.types import (
     Message,
 )
 
+from bot.faq_repository import clear_document_faq
 from config import settings, TZ_UTC5
 from ingestion.ingest import ingest_pdf
 from rag.retriever import Retriever
@@ -131,6 +132,7 @@ async def cmd_upload(message: Message, bot: Bot) -> None:
             return
 
         await repository.record_file_event(doc.file_name, title, "uploaded", n_chunks)
+        await clear_document_faq(doc.file_name)
 
         await _progress(
             f"✅ <b>{doc.file_name}</b> проиндексирован.\n"
@@ -410,6 +412,7 @@ async def cmd_delete(message: Message) -> None:
             logger.warning("Could not remove local file '%s': %s", local_file, e)
 
     await repository.record_file_event(filename, filename, "deleted", deleted)
+    await clear_document_faq(filename)
 
     await message.answer(
         f"🗑️ Документ <code>{filename}</code> удалён.\n"
@@ -628,6 +631,7 @@ async def cb_delete_confirm(callback: CallbackQuery) -> None:
                 logger.warning("Could not remove local file '%s': %s", local_file, e)
 
         await repository.record_file_event(filename, filename, "deleted", deleted)
+        await clear_document_faq(filename)
         await callback.message.edit_text(
             f"✅ Документ <code>{filename}</code> удалён.\n"
             f"Удалено чанков: <b>{deleted}</b>",

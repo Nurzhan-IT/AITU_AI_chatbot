@@ -212,6 +212,46 @@ class Retriever:
         logger.info("get_all_documents: %d unique documents", len(docs))
         return docs
 
+    async def get_document_chunks(self, filename: str, limit: int = 60) -> list[dict]:
+        """Return up to `limit` chunks for the given filename, used for FAQ generation."""
+        await self._ensure_collection()
+
+        file_filter = Filter(
+            must=[FieldCondition(key="filename", match=MatchValue(value=filename))]
+        )
+
+        chunks: list[dict] = []
+        offset = None
+
+        while len(chunks) < limit:
+            records, next_offset = await self._client.scroll(
+                collection_name=settings.qdrant_collection,
+                scroll_filter=file_filter,
+                limit=min(100, limit - len(chunks)),
+                offset=offset,
+                with_payload=True,
+                with_vectors=False,
+            )
+            for record in records:
+                p = record.payload or {}
+                page = p.get("page", 0)
+                chunks.append({
+                    "text": p.get("text", ""),
+                    "doc_title": p.get("doc_title", ""),
+                    "filename": p.get("filename", filename),
+                    "page": page,
+                    "page_end": p.get("page_end", page),
+                    "section_title": p.get("section_title", ""),
+                    "paragraph_range": p.get("paragraph_range", ""),
+                    "score": 1.0,
+                })
+            if next_offset is None:
+                break
+            offset = next_offset
+
+        logger.info("get_document_chunks('%s'): %d chunks", filename, len(chunks))
+        return chunks
+
     async def delete_document(self, filename: str) -> int:
         """Delete all chunks for the given filename. Returns number of deleted points."""
         await self._ensure_collection()

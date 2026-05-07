@@ -135,6 +135,54 @@ def _make_llm_client() -> Any:
 
 MIN_CHUNK_SCORE = 0.55
 
+_FAQ_SYSTEM_PROMPT = """You are an assistant that creates FAQ entries for a university document.
+
+Given the document content, generate exactly 10 frequently asked questions with clear, detailed answers.
+Cover the most important topics a student would ask about.
+
+Respond ONLY with a valid JSON array of exactly 10 objects — no markdown, no explanation:
+[
+  {"question": "...", "answer": "..."},
+  ...
+]
+
+Rules:
+- Write questions and answers in the same language as the document.
+- Base answers strictly on the provided document content.
+- Make questions practical and relevant for students.
+"""
+
+
+async def generate_document_faq(chunks: list[dict]) -> list[dict]:
+    """Generate 10 FAQ entries from document chunks. Returns list of {question, answer}."""
+    import json
+
+    if not chunks:
+        return []
+
+    client = _make_llm_client()
+    context = _build_context(chunks, max_tokens=8000)
+
+    response = await client.chat.completions.create(
+        model=settings.llm_model,
+        messages=[
+            {"role": "system", "content": _FAQ_SYSTEM_PROMPT},
+            {"role": "user", "content": f"Document content:\n{context}\n\nGenerate 10 FAQ entries."},
+        ],
+        temperature=0.3,
+        max_tokens=3000,
+    )
+    content = response.choices[0].message.content or ""
+
+    start = content.find("[")
+    end = content.rfind("]") + 1
+    if start == -1 or end == 0:
+        logger.error("generate_document_faq: no JSON array in LLM response")
+        raise ValueError("LLM did not return valid JSON FAQ array")
+
+    faqs = json.loads(content[start:end])
+    return [{"question": str(f["question"]), "answer": str(f["answer"])} for f in faqs[:10]]
+
 
 class Generator:
     def __init__(self) -> None:

@@ -144,6 +144,15 @@ async def init_db(db_path: str = "data/bot.db", log_path: str = "duplicate_detec
                 user_id                            INTEGER PRIMARY KEY,
                 is_been_notified_about_faq_update  INTEGER NOT NULL DEFAULT 1
             );
+
+            CREATE TABLE IF NOT EXISTS document_faq (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                filename    TEXT    NOT NULL,
+                question    TEXT    NOT NULL,
+                answer      TEXT    NOT NULL,
+                created_at  TEXT    NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_document_faq_filename ON document_faq(filename);
         """)
         await db.commit()
 

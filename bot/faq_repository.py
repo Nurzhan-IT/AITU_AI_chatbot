@@ -85,3 +85,31 @@ async def reset_all_user_notifications() -> None:
     async with aiosqlite.connect(settings.sqlite_db_path) as db:
         await db.execute("UPDATE users SET is_been_notified_about_faq_update=0")
         await db.commit()
+
+
+async def get_document_faq(filename: str) -> list[dict]:
+    async with aiosqlite.connect(settings.sqlite_db_path) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT id, question, answer FROM document_faq WHERE filename=? ORDER BY id ASC",
+            (filename,),
+        ) as cursor:
+            rows = await cursor.fetchall()
+    return [dict(row) for row in rows]
+
+
+async def save_document_faq(filename: str, faqs: list[dict]) -> None:
+    now = datetime.now(TZ_UTC5).isoformat()
+    async with aiosqlite.connect(settings.sqlite_db_path) as db:
+        await db.execute("DELETE FROM document_faq WHERE filename=?", (filename,))
+        await db.executemany(
+            "INSERT INTO document_faq (filename, question, answer, created_at) VALUES (?, ?, ?, ?)",
+            [(filename, faq["question"], faq["answer"], now) for faq in faqs],
+        )
+        await db.commit()
+
+
+async def clear_document_faq(filename: str) -> None:
+    async with aiosqlite.connect(settings.sqlite_db_path) as db:
+        await db.execute("DELETE FROM document_faq WHERE filename=?", (filename,))
+        await db.commit()
