@@ -325,6 +325,7 @@ async def handle_question(message: Message, state: FSMContext) -> None:
         chunks=chunks,
         answer=result["answer"],
         sources=result["sources"],
+        clarification_rounds=0,
     )
 
     text = f"💬 {result['answer']}"

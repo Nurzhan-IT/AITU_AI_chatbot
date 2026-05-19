@@ -19,6 +19,7 @@ from aiogram.types import (
 )
 
 from bot.handlers.dialog_states import ClarifyDialog
+from rag.dialog.enricher import enrich_query
 from rag.dialog.question_gen import next_clarification, _get_cached_docs
 
 logger = logging.getLogger(__name__)
@@ -103,12 +104,16 @@ async def _ask_next(message: Message, state: FSMContext) -> None:
 
 
 async def _proceed_to_search(message: Message, state: FSMContext) -> None:
-    """Temporary: run the same pipeline as handle_question on the original query.
+    """Run the RAG pipeline after a clarification dialog.
 
-    Stage 3 replaces this with an enriched query produced from collected answers.
+    Search uses an LLM-enriched query that fuses the original question with the
+    collected answers; the generator is still given the ORIGINAL question so the
+    user-facing answer matches how they asked it.
     """
     data = await state.get_data()
     original_query = data.get("original_query", "")
+    answers = data.get("answers", [])
+    rounds = data.get("rounds_done", 0)
     await state.clear()
 
     if not original_query:
@@ -130,8 +135,11 @@ async def _proceed_to_search(message: Message, state: FSMContext) -> None:
 
     user_id = message.from_user.id if message.from_user else 0
 
+    enriched = await enrich_query(original_query, answers) if answers else original_query
+    logger.debug("enriched_query: %r (rounds=%d)", enriched, rounds)
+
     try:
-        chunks = await _retriever.search(original_query)
+        chunks = await _retriever.search(enriched)
     except Exception as e:
         logger.error("Retrieval failed after clarification for user %s: %s", user_id, e)
         await status_msg.edit_text("😔 Не удалось выполнить поиск. Попробуйте позже.")
@@ -151,6 +159,7 @@ async def _proceed_to_search(message: Message, state: FSMContext) -> None:
         chunks=chunks,
         answer=result["answer"],
         sources=result["sources"],
+        clarification_rounds=rounds,
     )
 
     text = f"💬 {result['answer']}"

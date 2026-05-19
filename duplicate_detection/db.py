@@ -126,7 +126,8 @@ async def init_db(db_path: str = "data/bot.db", log_path: str = "duplicate_detec
                 sources       TEXT,
                 answer_length INTEGER,
                 timestamp     TEXT    NOT NULL,
-                feedback      INTEGER
+                feedback      INTEGER,
+                clarification_rounds INTEGER DEFAULT 0
             );
             CREATE INDEX IF NOT EXISTS idx_query_logs_user     ON query_logs(user_id);
             CREATE INDEX IF NOT EXISTS idx_query_logs_ts       ON query_logs(timestamp);
@@ -155,5 +156,14 @@ async def init_db(db_path: str = "data/bot.db", log_path: str = "duplicate_detec
             CREATE INDEX IF NOT EXISTS idx_document_faq_filename ON document_faq(filename);
         """)
         await db.commit()
+
+        # Idempotent migration: add clarification_rounds to existing query_logs.
+        try:
+            await db.execute(
+                "ALTER TABLE query_logs ADD COLUMN clarification_rounds INTEGER DEFAULT 0"
+            )
+            await db.commit()
+        except aiosqlite.OperationalError:
+            pass  # column already exists
 
     logger.info("SQLite database initialised at '%s'", db_path)
