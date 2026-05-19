@@ -152,12 +152,25 @@ async def _proceed_to_search(message: Message, state: FSMContext) -> None:
     logger.debug("enriched_query: %r (rounds=%d)", enriched, rounds)
     logger.info("Extracted profile: %s", profile)
 
+    profile_has_signal = bool(
+        profile.get("topics")
+        or profile.get("user_type")
+        or profile.get("document_hints")
+        or profile.get("temporal_context")
+    )
+
     try:
-        chunks = await _retriever.search(enriched)
+        if profile_has_signal:
+            chunks = await _retriever.search_with_profile(enriched, profile)
+        else:
+            chunks = await _retriever.search(enriched)
     except Exception as e:
         logger.error("Retrieval failed after clarification for user %s: %s", user_id, e)
         await status_msg.edit_text("😔 Не удалось выполнить поиск. Попробуйте позже.")
         return
+
+    if chunks:
+        logger.debug("Top chunk factor scores: %s", chunks[0].get("factor_scores"))
 
     try:
         result = await _generator.generate(original_query, chunks)
