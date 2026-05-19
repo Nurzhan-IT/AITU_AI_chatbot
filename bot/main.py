@@ -10,7 +10,7 @@ from aiogram.fsm.storage.memory import MemoryStorage
 
 from config import settings, TZ_UTC5
 from bot.auth.handler import router as auth_router
-from bot.handlers import admin, admin_faq, admin_ai_faq, user
+from bot.handlers import admin, admin_faq, admin_ai_faq, dialog, user
 from bot.handlers.feedback import router as feedback_router
 from rag.retriever import Retriever
 
@@ -60,6 +60,9 @@ async def main() -> None:
     dp.include_router(admin_faq.router)
     dp.include_router(admin_ai_faq.router)
     dp.include_router(feedback_router)
+    # Dialog router before user router — its state-scoped F.text handler must
+    # intercept clarification answers before the generic text handler.
+    dp.include_router(dialog.router)
     dp.include_router(user.router)
 
     logger.info("Starting polling...")

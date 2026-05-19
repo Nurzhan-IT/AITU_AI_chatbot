@@ -11,6 +11,7 @@ from urllib.parse import quote, urlsplit, urlunsplit
 
 from aiogram import F, Router
 from aiogram.filters import Command
+from aiogram.fsm.context import FSMContext
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, Message
 
 from bot.faq_repository import (
@@ -279,7 +280,7 @@ async def handle_document(message: Message) -> None:
 # ---------------------------------------------------------------------------
 
 @router.message(F.text)
-async def handle_question(message: Message) -> None:
+async def handle_question(message: Message, state: FSMContext) -> None:
     await _check_and_send_faq_notification(message)
 
     question = (message.text or "").strip()
@@ -295,6 +296,11 @@ async def handle_question(message: Message) -> None:
 
     intent = await classify_intent(question)
     logger.info("Intent classification: q='%.60s' result=%s", question, intent)
+
+    if intent["needs_clarification"]:
+        from bot.handlers.dialog import start_clarification_dialog
+        await start_clarification_dialog(message, question, state)
+        return
 
     status_msg = await message.answer("🔍 Ищу информацию...")
 
