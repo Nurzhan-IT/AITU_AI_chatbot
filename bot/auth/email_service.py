@@ -22,7 +22,7 @@ async def send_verification_code(to_email: str, code: str) -> bool:
             "<h2>Подтверждение почты</h2>"
             "<p>Ваш код подтверждения для доступа к AITU Chatbot:</p>"
             f"<h1 style='letter-spacing:8px;color:#1a56db'>{code}</h1>"
-            "<p style='color:#6b7280'>Код действителен 3 часа.<br>"
+            "<p style='color:#6b7280'>Код действителен 24 часа.<br>"
             "Если вы не запрашивали код — просто проигнорируйте это письмо.</p>"
             "</div>"
         ),

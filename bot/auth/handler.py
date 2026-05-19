@@ -100,7 +100,7 @@ async def handle_email(message: Message, state: FSMContext) -> None:
     await state.update_data(email=raw)
     await message.answer(
         f"✉️ Код подтверждения отправлен на <code>{raw}</code>\n\n"
-        "Введите 6-значный код (действителен 3 часа).",
+        "Введите 6-значный код (действителен 24 часа).",
         reply_markup=_resend_keyboard(),
     )
 

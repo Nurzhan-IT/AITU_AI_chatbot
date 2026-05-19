@@ -15,7 +15,7 @@ async def is_user_verified(user_id: int) -> bool:
 
 
 async def save_verification_code(user_id: int, email: str, code: str) -> None:
-    expires_at = (datetime.now(TZ_UTC5) + timedelta(hours=3)).isoformat()
+    expires_at = (datetime.now(TZ_UTC5) + timedelta(hours=24)).isoformat()
     async with aiosqlite.connect(settings.sqlite_db_path) as db:
         await db.execute(
             """
