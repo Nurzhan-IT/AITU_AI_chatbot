@@ -20,8 +20,10 @@ from aiogram.types import (
 )
 
 from bot.handlers.dialog_states import ClarifyDialog
+from config import settings
 from rag.dialog.enricher import enrich_query, extract_profile
 from rag.dialog.question_gen import next_clarification, _get_cached_docs
+from rag.dialog.reranker import rerank_chunks
 
 logger = logging.getLogger(__name__)
 router = Router()
@@ -161,7 +163,9 @@ async def _proceed_to_search(message: Message, state: FSMContext) -> None:
 
     try:
         if profile_has_signal:
-            chunks = await _retriever.search_with_profile(enriched, profile)
+            # Pull a wider candidate pool (10) for the LLM reranker to choose from.
+            chunks = await _retriever.search_with_profile(enriched, profile, k=10)
+            chunks = await rerank_chunks(original_query, chunks, k=settings.top_k)
         else:
             chunks = await _retriever.search(enriched)
     except Exception as e:
