@@ -19,6 +19,7 @@ from aiogram.types import (
 )
 
 from bot.handlers.dialog_states import ClarifyDialog
+from rag.dialog.question_gen import next_clarification, _get_cached_docs
 
 logger = logging.getLogger(__name__)
 router = Router()
@@ -28,13 +29,16 @@ _STOP_WORDS = {"не знаю", "неважно", "не важно", "idk", "wha
 _OPTION_LABEL_LIMIT = 50
 
 
-def _generate_question(state_data: dict) -> dict:
-    """Stub. Replaced by an LLM-driven generator in Stage 2 / Part B."""
-    return {
-        "question": "Уточните, пожалуйста, тему",
-        "options": ["Академическая", "Административная"],
-        "stop": False,
-    }
+async def _generate_question(state_data: dict) -> dict:
+    """LLM-driven next clarifying question, grounded in the cached doc list.
+
+    Reuses the global Retriever from bot.handlers.user to avoid spawning a
+    second Qdrant client. Imported lazily to keep the dependency direction
+    one-way (user.py → dialog.py at call time only).
+    """
+    from bot.handlers.user import _retriever
+    docs = await _get_cached_docs(_retriever)
+    return await next_clarification(state_data, docs)
 
 
 def clarify_keyboard(round_no: int, options: list[str]) -> InlineKeyboardMarkup:
@@ -53,25 +57,26 @@ def clarify_keyboard(round_no: int, options: list[str]) -> InlineKeyboardMarkup:
 async def start_clarification_dialog(
     message: Message, original_query: str, state: FSMContext
 ) -> None:
-    q = _generate_question({
-        "original_query": original_query,
-        "rounds_done": 0,
-        "answers": [],
-    })
-
     await state.set_state(ClarifyDialog.waiting_for_answer)
     await state.update_data(
         original_query=original_query,
         rounds_done=0,
         answers=[],
-        last_question=q["question"],
-        last_options=q["options"],
+        last_question="",
+        last_options=[],
     )
+
+    q = await _generate_question({
+        "original_query": original_query,
+        "rounds_done": 0,
+        "answers": [],
+    })
 
     if q.get("stop") or not q.get("question"):
         await _proceed_to_search(message, state)
         return
 
+    await state.update_data(last_question=q["question"], last_options=q["options"])
     kb = clarify_keyboard(0, q["options"]) if q["options"] else None
     await message.answer(q["question"], reply_markup=kb)
 
@@ -84,7 +89,7 @@ async def _ask_next(message: Message, state: FSMContext) -> None:
         await _proceed_to_search(message, state)
         return
 
-    q = _generate_question(data)
+    q = await _generate_question(data)
     if q.get("stop") or not q.get("question"):
         await _proceed_to_search(message, state)
         return
