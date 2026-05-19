@@ -24,6 +24,7 @@ from bot.handlers.feedback import feedback_keyboard, log_query
 from bot.keyboards.admin import admin_keyboard
 from bot.keyboards.user import user_keyboard
 from config import settings
+from rag.dialog.classifier import classify_intent
 from rag.generator import Generator
 from rag.retriever import Retriever
 
@@ -291,6 +292,9 @@ async def handle_question(message: Message) -> None:
             "⏳ Слишком много запросов. Пожалуйста, подождите немного."
         )
         return
+
+    intent = await classify_intent(question)
+    logger.info("Intent classification: q='%.60s' result=%s", question, intent)
 
     status_msg = await message.answer("🔍 Ищу информацию...")
 
