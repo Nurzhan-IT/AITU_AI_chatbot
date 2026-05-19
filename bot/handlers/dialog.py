@@ -6,6 +6,7 @@ drive a 1–3 round Q&A before falling through to RAG search. Question
 generation is currently a stub — a real LLM call is wired in at Part B.
 """
 
+import asyncio
 import logging
 
 from aiogram import F, Router
@@ -19,7 +20,7 @@ from aiogram.types import (
 )
 
 from bot.handlers.dialog_states import ClarifyDialog
-from rag.dialog.enricher import enrich_query
+from rag.dialog.enricher import enrich_query, extract_profile
 from rag.dialog.question_gen import next_clarification, _get_cached_docs
 
 logger = logging.getLogger(__name__)
@@ -135,8 +136,21 @@ async def _proceed_to_search(message: Message, state: FSMContext) -> None:
 
     user_id = message.from_user.id if message.from_user else 0
 
-    enriched = await enrich_query(original_query, answers) if answers else original_query
+    if answers:
+        enriched, profile = await asyncio.gather(
+            enrich_query(original_query, answers),
+            extract_profile(original_query, answers),
+        )
+    else:
+        enriched = original_query
+        profile = {
+            "topics": [],
+            "user_type": None,
+            "document_hints": [],
+            "temporal_context": None,
+        }
     logger.debug("enriched_query: %r (rounds=%d)", enriched, rounds)
+    logger.info("Extracted profile: %s", profile)
 
     try:
         chunks = await _retriever.search(enriched)

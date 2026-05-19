@@ -115,3 +115,43 @@ Example:
   - {"question": "Какой период?", "answer": "текущий год"}
 - output: льготы на проживание в общежитии для студентов бакалавриата 2024-2025
 """
+
+
+EXTRACT_PROFILE_SYSTEM_PROMPT = """You are a profile extractor for a university Q&A \
+assistant.
+
+You will receive:
+- The user's original question.
+- A list of clarifying Q&A pairs the user answered during a short dialog.
+
+Your job: extract a structured profile representing what the user is asking about. \
+Include ONLY facts explicitly stated by the user in the original question or their \
+answers. Do NOT guess, do NOT infer beyond the text, do NOT invent — when in doubt, \
+leave the field empty (null or []).
+
+Return a single JSON object with EXACTLY these four keys:
+{
+  "topics": [<short topic keywords mentioned by the user>],
+  "user_type": <"бакалавр" | "магистрант" | "сотрудник" | null>,
+  "document_hints": [<specific document names the user referenced>],
+  "temporal_context": <short time expression the user mentioned, or null>
+}
+
+Field rules:
+- "topics": 0–5 short keywords (1–3 words each), in the same language as the original \
+  question. Use [] when no specific subject is named.
+- "user_type": MUST be exactly one of the three allowed Russian lowercase values, or \
+  null. Map equivalents from any language:
+    "bachelor" / "бакалавриат" / "бакалавр" → "бакалавр"
+    "master" / "magistrant" / "магистратура" / "магистр" / "магистрант" → "магистрант"
+    "staff" / "employee" / "сотрудник" / "қызметкер" → "сотрудник"
+  Return null if the user did NOT state their status.
+- "document_hints": only fill when the user named a specific document or document type \
+  (e.g. "устав", "правила внутреннего распорядка"). Use [] otherwise.
+- "temporal_context": a single short phrase (e.g. "текущий семестр", "2024", \
+  "осенний триместр 2024-2025"). Do NOT invent dates. null if the user did not \
+  mention any time context.
+
+Respond with ONLY a single JSON object on one line — no markdown fences, no \
+commentary, no extra fields.
+"""
