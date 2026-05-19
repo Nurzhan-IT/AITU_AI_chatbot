@@ -220,6 +220,11 @@ async def _proceed_to_search(message: Message, state: FSMContext) -> None:
 
 @router.callback_query(F.data.startswith("clarify:"))
 async def cb_clarify(callback: CallbackQuery, state: FSMContext) -> None:
+    # Reject clicks that arrive after the dialog has already finished.
+    if await state.get_state() != ClarifyDialog.waiting_for_answer.state:
+        await callback.answer("Диалог уже завершён.")
+        return
+
     parts = (callback.data or "").split(":")
     if len(parts) != 3:
         await callback.answer()
@@ -231,6 +236,22 @@ async def cb_clarify(callback: CallbackQuery, state: FSMContext) -> None:
     last_question = data.get("last_question", "")
     answers = list(data.get("answers", []))
     rounds_done = data.get("rounds_done", 0)
+
+    # Reject clicks from an old keyboard (double-click or late delivery).
+    try:
+        btn_round = int(_round_str)
+    except ValueError:
+        await callback.answer()
+        return
+    if btn_round != rounds_done:
+        await callback.answer("Этот вопрос уже отвечен.")
+        return
+
+    # Remove the keyboard immediately so subsequent clicks have no effect.
+    try:
+        await callback.message.edit_reply_markup(reply_markup=None)
+    except Exception:
+        pass
 
     if choice == "skip":
         answers.append({"question": last_question, "answer": None, "skipped": True})

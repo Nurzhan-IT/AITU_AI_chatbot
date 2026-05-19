@@ -69,7 +69,7 @@ async def rerank_chunks(query: str, chunks: list[dict], k: int = 5) -> list[dict
                 {"role": "user", "content": _build_user_content(query, chunks)},
             ],
             temperature=0,
-            max_tokens=500,
+            max_tokens=700,
         )
         content = response.choices[0].message.content or ""
 

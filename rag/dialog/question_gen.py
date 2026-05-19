@@ -112,7 +112,7 @@ async def next_clarification(
                 {"role": "user", "content": user_content},
             ],
             temperature=0.2,
-            max_tokens=400,
+            max_tokens=600,
         )
         content = response.choices[0].message.content or ""
 

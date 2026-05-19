@@ -60,11 +60,14 @@ async def handle_feedback(callback: CallbackQuery) -> None:
         return
 
     async with aiosqlite.connect(settings.sqlite_db_path) as db:
-        await db.execute(
-            "UPDATE query_logs SET feedback = ? WHERE id = ?",
+        cursor = await db.execute(
+            "UPDATE query_logs SET feedback = ? WHERE id = ? AND feedback IS NULL",
             (rating, log_id),
         )
         await db.commit()
+        if cursor.rowcount == 0:
+            await callback.answer("Вы уже оценили этот ответ.")
+            return
 
     icon = "👍" if rating == 1 else "👎"
     await callback.answer(f"{icon} Спасибо за отзыв!")
