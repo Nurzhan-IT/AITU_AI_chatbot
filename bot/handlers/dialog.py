@@ -129,6 +129,7 @@ async def _proceed_to_search(message: Message, state: FSMContext) -> None:
         _build_sources_text,
         _disclaimer,
         _generator,
+        _md_to_html,
         _retriever,
         send_long_message,
     )
@@ -193,12 +194,13 @@ async def _proceed_to_search(message: Message, state: FSMContext) -> None:
         clarification_rounds=rounds,
     )
 
-    text = f"💬 {result['answer']}"
+    import html as _html
+    text = f"💬 {_md_to_html(result['answer'])}"
     sources = result["sources"]
     if sources:
         text += "\n\n📄 Источники:\n"
         text += _build_sources_text(sources)
-    text += "\n\n" + _disclaimer(result["detected_lang"])
+    text += "\n\n" + _html.escape(_disclaimer(result["detected_lang"]))
 
     keyboard = _build_keyboard(sources)
     if len(text) <= MAX_TG_LEN:
@@ -210,7 +212,7 @@ async def _proceed_to_search(message: Message, state: FSMContext) -> None:
             if keyboard
             else fb_kb
         )
-        await status_msg.edit_text(text, reply_markup=combined)
+        await status_msg.edit_text(text, reply_markup=combined, parse_mode="HTML")
     else:
         await status_msg.delete()
         await send_long_message(message, text, reply_markup=feedback_keyboard(log_id))

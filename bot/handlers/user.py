@@ -1,5 +1,7 @@
 import asyncio
+import html as _html
 import logging
+import re
 import shutil
 import subprocess
 import tempfile
@@ -88,9 +90,17 @@ async def _check_and_send_faq_notification(message: Message) -> None:
         await mark_user_notified(user_id)
 
 
+def _md_to_html(text: str) -> str:
+    text = _html.escape(text)
+    text = re.sub(r'\*\*(.+?)\*\*', r'<b>\1</b>', text, flags=re.DOTALL)
+    text = re.sub(r'(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)', r'<i>\1</i>', text)
+    text = re.sub(r'`([^`]+)`', r'<code>\1</code>', text)
+    return text
+
+
 async def send_long_message(message, text: str, reply_markup=None):
     if len(text) <= MAX_TG_LEN:
-        await message.answer(text, reply_markup=reply_markup)
+        await message.answer(text, reply_markup=reply_markup, parse_mode="HTML")
         return
     parts = []
     while len(text) > MAX_TG_LEN:
@@ -101,7 +111,7 @@ async def send_long_message(message, text: str, reply_markup=None):
         text = text[split_at:].lstrip()
     parts.append(text)
     for i, part in enumerate(parts):
-        await message.answer(part, reply_markup=reply_markup if i == len(parts) - 1 else None)
+        await message.answer(part, parse_mode="HTML", reply_markup=reply_markup if i == len(parts) - 1 else None)
 
 
 # ---------------------------------------------------------------------------
@@ -255,12 +265,12 @@ async def handle_document(message: Message) -> None:
         sources=result["sources"],
     )
 
-    text = f"💬 {result['answer']}"
+    text = f"💬 {_md_to_html(result['answer'])}"
     sources = result["sources"]
     if sources:
         text += "\n\n📄 Источники:\n"
         text += _build_sources_text(sources)
-    text += "\n\n" + _disclaimer(result["detected_lang"])
+    text += "\n\n" + _html.escape(_disclaimer(result["detected_lang"]))
 
     keyboard = _build_keyboard(sources)
     if len(text) <= MAX_TG_LEN:
@@ -269,7 +279,7 @@ async def handle_document(message: Message) -> None:
             InlineKeyboardMarkup(inline_keyboard=keyboard.inline_keyboard + fb_kb.inline_keyboard)
             if keyboard else fb_kb
         )
-        await status_msg.edit_text(text, reply_markup=combined)
+        await status_msg.edit_text(text, reply_markup=combined, parse_mode="HTML")
     else:
         await status_msg.delete()
         await send_long_message(message, text, reply_markup=feedback_keyboard(log_id))
@@ -328,14 +338,14 @@ async def handle_question(message: Message, state: FSMContext) -> None:
         clarification_rounds=0,
     )
 
-    text = f"💬 {result['answer']}"
+    text = f"💬 {_md_to_html(result['answer'])}"
 
     sources = result["sources"]
     if sources:
         text += "\n\n📄 Источники:\n"
         text += _build_sources_text(sources)
 
-    text += "\n\n" + _disclaimer(result["detected_lang"])
+    text += "\n\n" + _html.escape(_disclaimer(result["detected_lang"]))
 
     keyboard = _build_keyboard(sources)
     if len(text) <= MAX_TG_LEN:
@@ -347,7 +357,7 @@ async def handle_question(message: Message, state: FSMContext) -> None:
             )
         else:
             combined = fb_kb
-        await status_msg.edit_text(text, reply_markup=combined)
+        await status_msg.edit_text(text, reply_markup=combined, parse_mode="HTML")
     else:
         await status_msg.delete()
         await send_long_message(message, text, reply_markup=feedback_keyboard(log_id))
@@ -377,7 +387,7 @@ def _format_uploaded_at(raw: str) -> str:
 def _build_sources_text(sources: list[dict]) -> str:
     lines = []
     for src in sources:
-        doc_title = src.get("doc_title", "")
+        doc_title = _html.escape(src.get("doc_title", ""))
         pages = src.get("pages", [])
         pages_str = ", ".join(str(p) for p in pages)
         date_str = _format_uploaded_at(src.get("uploaded_at", ""))

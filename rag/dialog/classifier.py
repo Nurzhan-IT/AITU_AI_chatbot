@@ -35,7 +35,7 @@ async def classify_intent(question: str) -> ClassificationResult:
                 {"role": "user", "content": question},
             ],
             temperature=0,
-            max_tokens=50,
+            max_tokens=1000,
         )
         content = response.choices[0].message.content or ""
 
