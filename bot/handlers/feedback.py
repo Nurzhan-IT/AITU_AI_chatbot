@@ -123,9 +123,12 @@ async def handle_clarification_feedback(callback: CallbackQuery) -> None:
     icon = "👍" if helpful else "👎"
     await callback.answer(f"{icon} Спасибо за отзыв об уточнении!")
     try:
-        await callback.message.edit_reply_markup(reply_markup=None)
+        await callback.message.delete()
     except Exception:
-        pass
+        try:
+            await callback.message.edit_reply_markup(reply_markup=None)
+        except Exception:
+            pass
     logger.info(
         "Clarification feedback log_id=%d helpful=%d user=%s",
         log_id, helpful, callback.from_user and callback.from_user.id,

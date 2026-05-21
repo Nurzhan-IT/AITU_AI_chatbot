@@ -15,7 +15,7 @@ from typing import Optional, TypedDict
 
 from config import settings
 from rag.dialog.prompts import CLASSIFY_SYSTEM_PROMPT
-from rag.generator import _make_llm_client, supports_json_schema
+from rag.generator import _make_llm_client, _is_reasoning_model, supports_json_object, supports_json_schema
 
 logger = logging.getLogger(__name__)
 
@@ -96,13 +96,15 @@ async def classify_intent(question: str) -> ClassificationResult:
                 {"role": "user", "content": question},
             ],
             "temperature": 0,
-            "max_tokens": 50,
+            "max_tokens": 512 if _is_reasoning_model() else 50,
         }
         if supports_json_schema():
             request_kwargs["response_format"] = {
                 "type": "json_schema",
                 "json_schema": _CLASSIFY_JSON_SCHEMA,
             }
+        elif supports_json_object():
+            request_kwargs["response_format"] = {"type": "json_object"}
         response = await client.chat.completions.create(**request_kwargs)
         content = response.choices[0].message.content or ""
 
