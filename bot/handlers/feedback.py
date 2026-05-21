@@ -27,6 +27,7 @@ async def log_query(
     answer: str,
     sources: list[dict],
     clarification_rounds: int = 0,
+    classification_reason: str | None = None,
 ) -> int:
     """Insert a query_logs row and return its id."""
     avg_score = (
@@ -37,9 +38,11 @@ async def log_query(
     async with aiosqlite.connect(settings.sqlite_db_path) as db:
         cursor = await db.execute(
             """INSERT INTO query_logs
-               (user_id, query, detected_lang, avg_score, sources, answer_length, timestamp, clarification_rounds)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-            (user_id, query, detected_lang, avg_score, filenames, len(answer), ts, clarification_rounds),
+               (user_id, query, detected_lang, avg_score, sources, answer_length,
+                timestamp, clarification_rounds, classification_reason)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (user_id, query, detected_lang, avg_score, filenames, len(answer),
+             ts, clarification_rounds, classification_reason),
         )
         await db.commit()
         return cursor.lastrowid

@@ -26,17 +26,23 @@ The question may be written in Russian, English, or Kazakh. Treat all three lang
 equally — never demand a language switch and never let the language affect the verdict.
 
 Examples:
-- "Какой штраф за академическую задолженность?" → {"needs_clarification": false, "reason": "specific"}
-- "How do I apply for academic leave?" → {"needs_clarification": false, "reason": "specific"}
-- "Сколько стоит пересдача экзамена?" → {"needs_clarification": false, "reason": "specific"}
-- "Что мне делать?" → {"needs_clarification": true, "reason": "vague_topic"}
-- "Расскажи про правила" → {"needs_clarification": true, "reason": "vague_topic"}
-- "Какие есть льготы?" → {"needs_clarification": true, "reason": "ambiguous"}
-- "Tell me about the dormitory" → {"needs_clarification": true, "reason": "vague_topic"}
+- "Какой штраф за академическую задолженность?" → {"needs_clarification": false, "reason": "specific", "confidence": 0.95}
+- "How do I apply for academic leave?" → {"needs_clarification": false, "reason": "specific", "confidence": 0.9}
+- "Сколько стоит пересдача экзамена?" → {"needs_clarification": false, "reason": "specific", "confidence": 0.9}
+- "Что мне делать?" → {"needs_clarification": true, "reason": "vague_topic", "confidence": 0.95}
+- "Расскажи про правила" → {"needs_clarification": true, "reason": "vague_topic", "confidence": 0.85}
+- "Какие есть льготы?" → {"needs_clarification": true, "reason": "ambiguous", "confidence": 0.75}
+- "Tell me about the dormitory" → {"needs_clarification": true, "reason": "vague_topic", "confidence": 0.8}
+- "Какие документы нужны для оформления академического отпуска по болезни?" → {"needs_clarification": false, "reason": "specific", "confidence": 0.93}
+- "Сколько стоит повторное изучение дисциплины для магистрантов по финансовому регламенту АИТУ?" → {"needs_clarification": false, "reason": "specific", "confidence": 0.91}
+- "What are the quiet hours in the AITU dormitory according to the internal rules?" → {"needs_clarification": false, "reason": "specific", "confidence": 0.9}
+- "Жатақханаға қалай өтініш беруге болады?" → {"needs_clarification": false, "reason": "specific", "confidence": 0.88}
+- "Расскажи про академическую политику" → {"needs_clarification": true, "reason": "vague_topic", "confidence": 0.87}
+- "Какие скидки на оплату обучения существуют?" → {"needs_clarification": true, "reason": "ambiguous", "confidence": 0.8}
 
 Respond with ONLY a single JSON object on one line — no markdown fences, no commentary, \
 no extra fields:
-{"needs_clarification": <true|false>, "reason": "<specific|vague_topic|ambiguous>"}
+{"needs_clarification": <true|false>, "reason": "<specific|vague_topic|ambiguous>", "confidence": <0.0–1.0>}
 """
 
 
@@ -114,6 +120,39 @@ Example:
   - {"question": "Какая тема?", "answer": "общежитие"}
   - {"question": "Какой период?", "answer": "текущий год"}
 - output: льготы на проживание в общежитии для студентов бакалавриата 2024-2025
+"""
+
+
+ENRICH_AND_PROFILE_SYSTEM_PROMPT = """You are a search-query enricher AND profile \
+extractor for a university Q&A assistant.
+
+You will receive:
+- An original user question.
+- A list of clarifying Q&A pairs collected from the user during a short dialog.
+
+Your job: produce TWO outputs in a single JSON object:
+1. "enriched" — ONE optimal search-query string that fuses the original question with \
+   the context from the clarifications. Self-contained, information-dense, 5–20 words. \
+   Same language as the original question. No filler words, no question form.
+2. "profile" — a structured profile with exactly four keys:
+   - "topics": 0–5 short keywords (1–3 words each), same language as original question.
+   - "user_type": exactly one of "бакалавр" | "магистрант" | "сотрудник" | null.
+   - "document_hints": specific document names the user referenced, or [].
+   - "temporal_context": a short time phrase the user mentioned, or null.
+
+Rules:
+- LANGUAGE: write "enriched" in the SAME language as the original question.
+- Ignore Q&A pairs where the answer is null, empty, or skipped.
+- Do NOT invent facts not present in the input.
+- Output ONLY a single JSON object on one line — no markdown fences, no commentary.
+
+Example:
+- original: "Какие есть льготы?"
+- answers: [{{"question": "Кто вы?", "answer": "бакалавр"}}, \
+  {{"question": "Какая тема?", "answer": "общежитие"}}]
+- output: {{"enriched": "льготы на проживание в общежитии для студентов бакалавриата", \
+  "profile": {{"topics": ["льготы", "общежитие"], "user_type": "бакалавр", \
+  "document_hints": [], "temporal_context": null}}}}
 """
 
 

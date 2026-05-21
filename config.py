@@ -50,6 +50,10 @@ class Settings(BaseSettings):
     top_k: int = Field(default=5, ge=1, le=20)
     min_chunk_score: float = Field(default=0.55, ge=0.0, le=1.0)
 
+    # Intent classifier confidence thresholds (heuristic; replaced by score-based triage in phase C)
+    classify_conf_high: float = Field(default=0.7, ge=0.0, le=1.0)
+    classify_conf_low: float = Field(default=0.4, ge=0.0, le=1.0)
+
     # Duplicate / stale detection
     duplicate_threshold: float = Field(default=0.90, ge=0.0, le=1.0)
     stale_threshold_low: float = Field(default=0.75, ge=0.0, le=1.0)

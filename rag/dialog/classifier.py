@@ -20,6 +20,7 @@ logger = logging.getLogger(__name__)
 class ClassificationResult(TypedDict):
     needs_clarification: bool
     reason: str
+    confidence: float
 
 
 _VALID_REASONS = {"specific", "vague_topic", "ambiguous"}
@@ -35,7 +36,7 @@ async def classify_intent(question: str) -> ClassificationResult:
                 {"role": "user", "content": question},
             ],
             temperature=0,
-            max_tokens=1000,
+            max_tokens=50,
         )
         content = response.choices[0].message.content or ""
 
@@ -49,11 +50,28 @@ async def classify_intent(question: str) -> ClassificationResult:
         reason = str(data.get("reason", "")).strip()
         if reason not in _VALID_REASONS:
             reason = "vague_topic" if needs else "specific"
-        return ClassificationResult(needs_clarification=needs, reason=reason)
+        try:
+            confidence = float(data["confidence"])
+            if not (0.0 <= confidence <= 1.0):
+                raise ValueError
+        except (KeyError, TypeError, ValueError):
+            confidence = 0.5
+
+        if confidence >= settings.classify_conf_high:
+            conf_label = "dialog" if needs else "direct-search"
+        elif confidence >= settings.classify_conf_low:
+            conf_label = "borderline"
+        else:
+            conf_label = "direct-search"
+        logger.debug(
+            "classify_intent q=%.80r → needs_clarification=%s reason=%s confidence=%.2f (%s)",
+            question, needs, reason, confidence, conf_label,
+        )
+        return ClassificationResult(needs_clarification=needs, reason=reason, confidence=confidence)
     except Exception:
         logger.warning(
             "classify_intent failed for q=%.80r; falling back to needs_clarification=False",
             question,
             exc_info=True,
         )
-        return ClassificationResult(needs_clarification=False, reason="error")
+        return ClassificationResult(needs_clarification=False, reason="error", confidence=0.5)

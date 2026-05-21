@@ -24,6 +24,11 @@ _DOCS_TTL = 600  # seconds (10 minutes)
 _docs_cache: dict = {"items": None, "expires_at": 0.0}
 
 
+def invalidate_docs_cache() -> None:
+    """Force the next _get_cached_docs call to re-fetch from Qdrant."""
+    _docs_cache["expires_at"] = 0.0
+
+
 class ClarificationQuestion(TypedDict):
     question: str
     options: list[str]

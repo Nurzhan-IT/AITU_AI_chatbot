@@ -385,6 +385,9 @@ async def ingest_pdf(
         settings.qdrant_collection,
     )
 
+    from rag.dialog.question_gen import invalidate_docs_cache
+    invalidate_docs_cache()
+
     await embedder.aclose()
     await client.close()
     return len(points)

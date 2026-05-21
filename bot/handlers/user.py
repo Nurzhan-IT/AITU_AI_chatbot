@@ -309,7 +309,7 @@ async def handle_question(message: Message, state: FSMContext) -> None:
 
     if intent["needs_clarification"]:
         from bot.handlers.dialog import start_clarification_dialog
-        await start_clarification_dialog(message, question, state)
+        await start_clarification_dialog(message, question, state, classification_reason=intent["reason"])
         return
 
     status_msg = await message.answer("🔍 Ищу информацию...")
@@ -336,6 +336,7 @@ async def handle_question(message: Message, state: FSMContext) -> None:
         answer=result["answer"],
         sources=result["sources"],
         clarification_rounds=0,
+        classification_reason=intent["reason"],
     )
 
     text = f"💬 {_md_to_html(result['answer'])}"

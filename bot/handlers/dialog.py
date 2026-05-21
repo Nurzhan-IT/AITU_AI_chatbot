@@ -6,7 +6,6 @@ drive a 1–3 round Q&A before falling through to RAG search. Question
 generation is currently a stub — a real LLM call is wired in at Part B.
 """
 
-import asyncio
 import logging
 
 from aiogram import F, Router
@@ -21,7 +20,7 @@ from aiogram.types import (
 
 from bot.handlers.dialog_states import ClarifyDialog
 from config import settings
-from rag.dialog.enricher import enrich_query, extract_profile
+from rag.dialog.enricher import enrich_and_profile
 from rag.dialog.question_gen import next_clarification, _get_cached_docs
 from rag.dialog.reranker import rerank_chunks
 
@@ -29,7 +28,8 @@ logger = logging.getLogger(__name__)
 router = Router()
 
 _MAX_ROUNDS = 3
-_STOP_WORDS = {"не знаю", "неважно", "не важно", "idk", "whatever", "pass"}
+_STOP_WORDS = {"не знаю", "неважно", "не важно", "idk", "whatever", "pass",
+               "білмеймін", "маңызды емес", "өткізіп жіберу"}
 _OPTION_LABEL_LIMIT = 50
 
 
@@ -59,7 +59,10 @@ def clarify_keyboard(round_no: int, options: list[str]) -> InlineKeyboardMarkup:
 
 
 async def start_clarification_dialog(
-    message: Message, original_query: str, state: FSMContext
+    message: Message,
+    original_query: str,
+    state: FSMContext,
+    classification_reason: str | None = None,
 ) -> None:
     await state.set_state(ClarifyDialog.waiting_for_answer)
     await state.update_data(
@@ -68,6 +71,7 @@ async def start_clarification_dialog(
         answers=[],
         last_question="",
         last_options=[],
+        classification_reason=classification_reason,
     )
 
     q = await _generate_question({
@@ -106,6 +110,20 @@ async def _ask_next(message: Message, state: FSMContext) -> None:
     await message.answer(q["question"], reply_markup=kb)
 
 
+def _profile_is_strong(profile: dict) -> bool:
+    """Return True when the profile warrants the expensive search_with_profile + rerank path.
+
+    Strong if a high-signal slot is filled (user_type or document_hints), or if two
+    or more slots are non-empty. A single weak slot (e.g. one topics keyword) falls
+    through to the cheap _retriever.search path.
+    """
+    strong = bool(profile.get("user_type") or profile.get("document_hints"))
+    if strong:
+        return True
+    filled = sum(1 for key in ("topics", "temporal_context") if profile.get(key))
+    return filled >= 2
+
+
 async def _proceed_to_search(message: Message, state: FSMContext) -> None:
     """Run the RAG pipeline after a clarification dialog.
 
@@ -117,6 +135,7 @@ async def _proceed_to_search(message: Message, state: FSMContext) -> None:
     original_query = data.get("original_query", "")
     answers = data.get("answers", [])
     rounds = data.get("rounds_done", 0)
+    classification_reason = data.get("classification_reason")
     await state.clear()
 
     if not original_query:
@@ -139,31 +158,12 @@ async def _proceed_to_search(message: Message, state: FSMContext) -> None:
 
     user_id = message.from_user.id if message.from_user else 0
 
-    if answers:
-        enriched, profile = await asyncio.gather(
-            enrich_query(original_query, answers),
-            extract_profile(original_query, answers),
-        )
-    else:
-        enriched = original_query
-        profile = {
-            "topics": [],
-            "user_type": None,
-            "document_hints": [],
-            "temporal_context": None,
-        }
+    enriched, profile = await enrich_and_profile(original_query, answers)
     logger.debug("enriched_query: %r (rounds=%d)", enriched, rounds)
     logger.info("Extracted profile: %s", profile)
 
-    profile_has_signal = bool(
-        profile.get("topics")
-        or profile.get("user_type")
-        or profile.get("document_hints")
-        or profile.get("temporal_context")
-    )
-
     try:
-        if profile_has_signal:
+        if _profile_is_strong(profile):
             # Pull a wider candidate pool (10) for the LLM reranker to choose from.
             chunks = await _retriever.search_with_profile(enriched, profile, k=10)
             chunks = await rerank_chunks(original_query, chunks, k=settings.top_k)
@@ -192,6 +192,7 @@ async def _proceed_to_search(message: Message, state: FSMContext) -> None:
         answer=result["answer"],
         sources=result["sources"],
         clarification_rounds=rounds,
+        classification_reason=classification_reason,
     )
 
     import html as _html
