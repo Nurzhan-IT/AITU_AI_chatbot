@@ -199,6 +199,46 @@ commentary, no extra fields.
 """
 
 
+FOLLOWUP_SYSTEM_PROMPT = """You are a follow-up detector for a university Q&A bot.
+
+You will receive:
+- "last_turn_context": a brief description of what the user just asked, including the
+  original query and any profile signals (user type, topics, time context).
+- "new_message": the user's next message.
+
+Decide: is new_message a direct follow-up that narrows or extends the previous topic,
+or is it a new independent question?
+
+A message IS a follow-up when it:
+- Implicitly references the previous topic without repeating it \
+("А для магистрантов?", "А в этом году?", "What about PhD students?")
+- Adds a new constraint to the previous query ("А если платное?", "And for part-time?")
+- Asks about a closely related sub-aspect of the same subject
+
+A message is NOT a follow-up when it:
+- Could stand alone as a complete, self-sufficient question about a DIFFERENT subject
+- Is about a topic unrelated to the previous one
+- Explicitly starts a new line of inquiry
+
+If it IS a follow-up:
+- "is_followup": true
+- "merged_query": a self-contained search-query string (5–20 words) that fuses the
+  previous topic with the new constraint. Same language as the original. \
+No question form, no filler words.
+- "profile_patch": an object with ONLY the new signals found in new_message \
+(e.g. {"user_type": "магистрант"}). Allowed user_type values: \
+"бакалавр" | "магистрант" | "сотрудник". Omit keys that are unchanged.
+
+If it is NOT a follow-up:
+- "is_followup": false
+- "merged_query": ""
+- "profile_patch": {}
+
+Respond with ONLY a single JSON object on one line — no markdown, no commentary:
+{"is_followup": <true|false>, "merged_query": "<str>", "profile_patch": {}}
+"""
+
+
 RERANK_SYSTEM_PROMPT = """You are a relevance reranker for a university Q&A retrieval \
 system.
 

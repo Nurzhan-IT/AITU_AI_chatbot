@@ -192,6 +192,30 @@ async def _ask_next(message: Message, state: FSMContext) -> None:
         await _proceed_to_search(message, state)
         return
 
+    # Early exit: profile built from answers so far is already strong — no point
+    # asking more questions.  We call enrich_and_profile once here and cache the
+    # result in FSM state so _proceed_to_search can reuse it without a second call.
+    answers = data.get("answers", [])
+    if answers:
+        original_query = data.get("original_query", "")
+        try:
+            enriched, profile = await enrich_and_profile(original_query, answers)
+            if _profile_is_strong(profile):
+                logger.debug(
+                    "_ask_next early exit: strong profile after %d round(s) — %s",
+                    rounds, profile,
+                )
+                await state.update_data(
+                    prefetched_enriched=enriched,
+                    prefetched_profile=dict(profile),
+                )
+                await _proceed_to_search(message, state)
+                return
+        except Exception:
+            logger.debug(
+                "_ask_next early-exit profile check failed; continuing dialog", exc_info=True
+            )
+
     q = await _generate_question(data)
     if q.get("stop") or not q.get("question"):
         await _proceed_to_search(message, state)
@@ -266,9 +290,19 @@ async def _proceed_to_search(message: Message, state: FSMContext) -> None:
 
     user_id = message.from_user.id if message.from_user else 0
 
-    enriched, profile = await enrich_and_profile(original_query, answers)
+    _prefetched_enriched = data.get("prefetched_enriched")
+    _prefetched_profile  = data.get("prefetched_profile")
+    if _prefetched_enriched is not None and _prefetched_profile is not None:
+        enriched = _prefetched_enriched
+        profile  = _prefetched_profile
+        logger.debug("_proceed_to_search: reusing prefetched profile (rounds=%d)", rounds)
+    else:
+        enriched, profile = await enrich_and_profile(original_query, answers)
     logger.debug("enriched_query: %r (rounds=%d)", enriched, rounds)
     logger.info("Extracted profile: %s", profile)
+
+    from rag.dialog.followup import save_context
+    save_context(user_id, original_query, enriched, profile)
 
     # --- Stage 6/7: filter-first retrieval (D2) ----------------------------
     chunks: list[dict] | None = None

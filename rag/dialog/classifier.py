@@ -6,9 +6,12 @@ the classifier runs in read-only mode — the result is logged but does not
 yet change handler behavior (see bot/handlers/user.py).
 """
 
+import hashlib
 import json
 import logging
-from typing import TypedDict
+import time
+from collections import OrderedDict
+from typing import Optional, TypedDict
 
 from config import settings
 from rag.dialog.prompts import CLASSIFY_SYSTEM_PROMPT
@@ -24,6 +27,39 @@ class ClassificationResult(TypedDict):
 
 
 _VALID_REASONS = {"specific", "vague_topic", "ambiguous"}
+
+# ---------------------------------------------------------------------------
+# In-memory classification cache
+# ---------------------------------------------------------------------------
+_CACHE_TTL   = 86_400.0   # 24 hours
+_CACHE_MAX   = 1_000      # evict oldest when exceeded
+
+_cache: OrderedDict[str, tuple["ClassificationResult", float]] = OrderedDict()
+
+
+def _cache_key(question: str) -> str:
+    normalized = " ".join(question.lower().split())
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:16]
+
+
+def _cache_get(key: str) -> Optional["ClassificationResult"]:
+    entry = _cache.get(key)
+    if entry is None:
+        return None
+    result, expires_at = entry
+    if time.time() > expires_at:
+        del _cache[key]
+        return None
+    _cache.move_to_end(key)
+    return result
+
+
+def _cache_put(key: str, result: "ClassificationResult") -> None:
+    if key in _cache:
+        _cache.move_to_end(key)
+    _cache[key] = (result, time.time() + _CACHE_TTL)
+    while len(_cache) > _CACHE_MAX:
+        _cache.popitem(last=False)
 
 # Strict JSON Schema for providers with structured-output support. It eliminates
 # the "model wrapped JSON in markdown" failure class at the source. Providers
@@ -45,6 +81,12 @@ _CLASSIFY_JSON_SCHEMA = {
 
 
 async def classify_intent(question: str) -> ClassificationResult:
+    key = _cache_key(question)
+    cached = _cache_get(key)
+    if cached is not None:
+        logger.debug("classify_intent cache hit q=%.80r", question)
+        return cached
+
     try:
         client = _make_llm_client()
         request_kwargs = {
@@ -93,7 +135,9 @@ async def classify_intent(question: str) -> ClassificationResult:
             "classify_intent q=%.80r → needs_clarification=%s reason=%s confidence=%.2f (%s)",
             question, needs, reason, confidence, conf_label,
         )
-        return ClassificationResult(needs_clarification=needs, reason=reason, confidence=confidence)
+        result = ClassificationResult(needs_clarification=needs, reason=reason, confidence=confidence)
+        _cache_put(key, result)
+        return result
     except Exception:
         logger.warning(
             "classify_intent failed for q=%.80r; falling back to triage Stage 1 heuristics",

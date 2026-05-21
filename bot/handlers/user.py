@@ -355,44 +355,82 @@ async def handle_question(message: Message, state: FSMContext) -> None:
         )
         return
 
-    intent = await classify_intent(question)
-    logger.info("Intent classification: q='%.60s' result=%s", question, intent)
+    # Follow-up detection: if a fresh completed-turn context exists for this user,
+    # ask the LLM whether the new message continues that topic.  When it does, skip
+    # the clarification dialog entirely and go straight to search with the merged
+    # query + inherited profile.
+    from rag.dialog.followup import check_followup, save_context
+    is_followup, merged_query, saved_profile = await check_followup(user_id, question)
 
-    # Shadow-mode triage: logs a comparison verdict off the hot path, never
-    # changes the response. See _run_shadow_triage and rag/dialog/triage.py.
-    _spawn_shadow_triage(question, intent)
+    classification_reason: str
+    if is_followup:
+        classification_reason = "followup"
+        logger.info(
+            "follow-up path: user_id=%d q=%.60r merged=%.60r",
+            user_id, question, merged_query,
+        )
+    else:
+        intent = await classify_intent(question)
+        logger.info("Intent classification: q='%.60s' result=%s", question, intent)
 
-    if intent["needs_clarification"]:
-        from bot.handlers.dialog import start_clarification_dialog
-        await start_clarification_dialog(message, question, state, classification_reason=intent["reason"])
-        return
+        # Shadow-mode triage: logs a comparison verdict off the hot path, never
+        # changes the response. See _run_shadow_triage and rag/dialog/triage.py.
+        _spawn_shadow_triage(question, intent)
+        classification_reason = intent["reason"]
+
+        if intent["needs_clarification"]:
+            from bot.handlers.dialog import start_clarification_dialog
+            await start_clarification_dialog(
+                message, question, state, classification_reason=intent["reason"]
+            )
+            return
 
     status_msg = await message.answer("🔍 Ищу информацию...")
 
     try:
-        chunks = await _retriever.search(question)
+        if is_followup:
+            from rag.dialog.reranker import rerank_chunks
+            profile_strong = bool(
+                saved_profile.get("user_type") or saved_profile.get("document_hints")
+            ) or sum(
+                1 for k in ("topics", "temporal_context") if saved_profile.get(k)
+            ) >= 2
+            if profile_strong:
+                chunks = await _retriever.search_with_profile(merged_query, saved_profile, k=10)
+                chunks = await rerank_chunks(question, chunks, k=settings.top_k)
+            else:
+                chunks = await _retriever.search(merged_query)
+        else:
+            chunks = await _retriever.search(question)
     except Exception as e:
-        logger.error("Retrieval failed for user %s: %s", message.from_user and message.from_user.id, e)
+        logger.error("Retrieval failed for user %s: %s", user_id, e)
         await status_msg.edit_text("😔 Не удалось выполнить поиск. Попробуйте позже.")
         return
 
     try:
         result = await _generator.generate(question, chunks)
     except Exception as e:
-        logger.error("Generation failed for user %s: %s", message.from_user and message.from_user.id, e)
+        logger.error("Generation failed for user %s: %s", user_id, e)
         await status_msg.edit_text("😔 Не удалось сформировать ответ. Попробуйте позже.")
         return
 
     log_id = await log_query(
-        user_id=message.from_user.id if message.from_user else 0,
+        user_id=user_id,
         query=question,
         detected_lang=result["detected_lang"],
         chunks=chunks,
         answer=result["answer"],
         sources=result["sources"],
         clarification_rounds=0,
-        classification_reason=intent["reason"],
+        classification_reason=classification_reason,
     )
+
+    # Save turn context so subsequent follow-ups can reuse it.
+    from rag.dialog.enricher import UserProfile as _UserProfile
+    _profile_to_save = saved_profile if is_followup else _UserProfile(
+        topics=[], user_type=None, document_hints=[], temporal_context=None,
+    )
+    save_context(user_id, question, merged_query if is_followup else question, _profile_to_save)
 
     text = f"💬 {_md_to_html(result['answer'])}"
 

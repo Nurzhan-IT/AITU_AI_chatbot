@@ -6,7 +6,20 @@ from difflib import SequenceMatcher
 
 import numpy as np
 from qdrant_client import AsyncQdrantClient
-from qdrant_client.models import Distance, FieldCondition, Filter, MatchValue, VectorParams
+from qdrant_client.models import (
+    Distance,
+    FieldCondition,
+    Filter,
+    Fusion,
+    FusionQuery,
+    MatchValue,
+    NamedVector,
+    Prefetch,
+    SparseIndexParams,
+    SparseVector,
+    SparseVectorParams,
+    VectorParams,
+)
 
 from config import settings, TZ_UTC5
 from rag.embedder import Embedder
@@ -179,14 +192,72 @@ class Retriever:
         # in search_with_profile. Keyed by raw section_title string.
         self._section_emb_cache: dict[str, list[float]] = {}
 
+        # Set on first _ensure_collection call; avoids redundant get_collection
+        # calls on every search after startup.
+        self._collection_checked: bool = False
+        # True when the collection uses named vectors ("dense") instead of the
+        # legacy single unnamed vector.  Required for all search calls once
+        # the collection is in hybrid schema.
+        self._uses_named_vectors: bool = False
+        # True when hybrid_search_enabled AND the collection has sparse vectors.
+        self._hybrid_active: bool = False
+        # BM25 corpus statistics, loaded lazily on first search when hybrid active.
+        self._bm25_stats: object | None = None   # type: BM25Stats | None
+
     async def _ensure_collection(self) -> None:
+        if self._collection_checked:
+            return
+
         exists = await self._client.collection_exists(settings.qdrant_collection)
         if not exists:
-            await self._client.create_collection(
-                collection_name=settings.qdrant_collection,
-                vectors_config=VectorParams(size=_VECTOR_SIZE, distance=Distance.COSINE),
+            if settings.hybrid_search_enabled:
+                await self._client.create_collection(
+                    collection_name=settings.qdrant_collection,
+                    vectors_config={"dense": VectorParams(size=_VECTOR_SIZE, distance=Distance.COSINE)},
+                    sparse_vectors_config={"sparse": SparseVectorParams(
+                        index=SparseIndexParams(on_disk=False)
+                    )},
+                )
+                self._uses_named_vectors = True
+                self._hybrid_active = True
+            else:
+                await self._client.create_collection(
+                    collection_name=settings.qdrant_collection,
+                    vectors_config=VectorParams(size=_VECTOR_SIZE, distance=Distance.COSINE),
+                )
+            logger.info(
+                "Created collection '%s' (hybrid=%s)",
+                settings.qdrant_collection, settings.hybrid_search_enabled,
             )
-            logger.info("Created collection '%s'", settings.qdrant_collection)
+        else:
+            info = await self._client.get_collection(settings.qdrant_collection)
+            named = isinstance(info.config.params.vectors, dict)
+            if named:
+                self._uses_named_vectors = True
+                has_sparse = bool(
+                    info.config.params.sparse_vectors
+                    and "sparse" in info.config.params.sparse_vectors
+                )
+                if settings.hybrid_search_enabled and has_sparse:
+                    self._hybrid_active = True
+                elif settings.hybrid_search_enabled:
+                    logger.warning(
+                        "HYBRID_SEARCH_ENABLED=True but collection '%s' has no sparse "
+                        "vectors — re-index all documents to activate hybrid search. "
+                        "Falling back to dense-only search for now.",
+                        settings.qdrant_collection,
+                    )
+
+        if self._hybrid_active:
+            from pathlib import Path as _Path
+            from rag.bm25 import BM25Stats
+            self._bm25_stats = BM25Stats.load(_Path(settings.bm25_stats_path))
+            logger.info(
+                "Hybrid search active: BM25 stats loaded (%d chunks)",
+                self._bm25_stats.total_chunks,
+            )
+
+        self._collection_checked = True
 
     async def ping(self) -> bool:
         try:
@@ -199,20 +270,74 @@ class Retriever:
         await self._ensure_collection()
 
         vector = await self._embedder.embed_query(query)
-        results = await self._client.search(
-            collection_name=settings.qdrant_collection,
-            query_vector=vector,
-            limit=settings.top_k * 3,
-            with_payload=True,
-            with_vectors=True,
-        )
+        prefetch_limit = settings.top_k * 3
+
+        if self._hybrid_active:
+            from rag.bm25 import tokenize as bm25_tokenize, bm25_query_vector
+            stats = self._bm25_stats
+            q_tokens = bm25_tokenize(query)
+            q_indices, q_values = bm25_query_vector(
+                q_tokens, stats.doc_freq, stats.total_chunks
+            )
+
+            if q_indices:
+                # Qdrant native RRF fusion: dense prefetch + sparse prefetch → fuse
+                response = await self._client.query_points(
+                    collection_name=settings.qdrant_collection,
+                    prefetch=[
+                        Prefetch(query=vector, using="dense", limit=prefetch_limit),
+                        Prefetch(
+                            query=SparseVector(indices=q_indices, values=q_values),
+                            using="sparse",
+                            limit=prefetch_limit,
+                        ),
+                    ],
+                    query=FusionQuery(fusion=Fusion.RRF),
+                    limit=prefetch_limit,
+                    with_payload=True,
+                    with_vectors=True,
+                )
+                points = response.points
+                logger.debug(
+                    "search('%s') hybrid RRF: %d fused hits", query[:60], len(points)
+                )
+            else:
+                # All query tokens were stopwords — fall back to dense
+                logger.debug("search('%s'): empty sparse query, using dense only", query[:60])
+                points = await self._client.search(
+                    collection_name=settings.qdrant_collection,
+                    query_vector=NamedVector(name="dense", vector=vector),
+                    limit=prefetch_limit,
+                    with_payload=True,
+                    with_vectors=True,
+                )
+        elif self._uses_named_vectors:
+            points = await self._client.search(
+                collection_name=settings.qdrant_collection,
+                query_vector=NamedVector(name="dense", vector=vector),
+                limit=prefetch_limit,
+                with_payload=True,
+                with_vectors=True,
+            )
+        else:
+            points = await self._client.search(
+                collection_name=settings.qdrant_collection,
+                query_vector=vector,
+                limit=prefetch_limit,
+                with_payload=True,
+                with_vectors=True,
+            )
 
         hits = []
-        for point in results:
+        for point in points:
             p = point.payload or {}
             filename = p.get("filename", "")
             url = f"{settings.pdf_base_url.rstrip('/')}/{filename}" if filename else ""
             page = p.get("page", 0)
+            # When vectors are named, point.vector is a dict; extract dense component
+            # for MMR diversity re-ranking.
+            raw_vec = point.vector
+            dense_vec = raw_vec["dense"] if isinstance(raw_vec, dict) else raw_vec
             hits.append(
                 {
                     "text": p.get("text", ""),
@@ -225,12 +350,12 @@ class Retriever:
                     "section_title": p.get("section_title", ""),
                     "paragraph_range": p.get("paragraph_range", ""),
                     "score": point.score,
-                    "_vector": point.vector,
+                    "_vector": dense_vec,
                 }
             )
 
         hits = mmr(vector, hits, k=settings.top_k)
-        logger.debug("search('%s'): %d hits", query[:60], len(hits))
+        logger.debug("search('%s'): %d hits (hybrid=%s)", query[:60], len(hits), self._hybrid_active)
         return hits
 
     async def probe_search(
@@ -250,9 +375,15 @@ class Retriever:
 
         vector = await self._embedder.embed_query(query)
         limit = k if k is not None else settings.triage_probe_k
+        # probe_search is dense-only even in hybrid mode — triage Stage 3 needs
+        # undistorted cosine score distributions, not fused RRF scores.
+        query_vec_arg = (
+            NamedVector(name="dense", vector=vector)
+            if self._uses_named_vectors else vector
+        )
         results = await self._client.search(
             collection_name=settings.qdrant_collection,
-            query_vector=vector,
+            query_vector=query_vec_arg,
             limit=limit,
             with_payload=True,
             with_vectors=False,
@@ -305,9 +436,13 @@ class Retriever:
             vector = await self._embedder.embed_query(q)
             if original_query_vec is None:
                 original_query_vec = vector
+            query_vec_arg = (
+                NamedVector(name="dense", vector=vector)
+                if self._uses_named_vectors else vector
+            )
             results = await self._client.search(
                 collection_name=settings.qdrant_collection,
-                query_vector=vector,
+                query_vector=query_vec_arg,
                 limit=limit * 3,
                 with_payload=True,
                 with_vectors=True,
@@ -320,6 +455,8 @@ class Retriever:
                 filename = p.get("filename", "")
                 url = f"{settings.pdf_base_url.rstrip('/')}/{filename}" if filename else ""
                 page = p.get("page", 0)
+                raw_vec = point.vector
+                dense_vec = raw_vec["dense"] if isinstance(raw_vec, dict) else raw_vec
                 all_results.append({
                     "text": p.get("text", ""),
                     "doc_title": p.get("doc_title", ""),
@@ -331,7 +468,7 @@ class Retriever:
                     "section_title": p.get("section_title", ""),
                     "paragraph_range": p.get("paragraph_range", ""),
                     "score": point.score,
-                    "_vector": point.vector,
+                    "_vector": dense_vec,
                 })
 
         merged = mmr(original_query_vec, all_results, k=limit)
@@ -362,9 +499,13 @@ class Retriever:
         candidate_limit = settings.top_k * 5
         final_k = k if k is not None else settings.top_k
 
+        query_vec_arg = (
+            NamedVector(name="dense", vector=query_vec)
+            if self._uses_named_vectors else query_vec
+        )
         results = await self._client.search(
             collection_name=settings.qdrant_collection,
-            query_vector=query_vec,
+            query_vector=query_vec_arg,
             limit=candidate_limit,
             with_payload=True,
             with_vectors=True,
@@ -376,6 +517,8 @@ class Retriever:
             filename = p.get("filename", "")
             url = f"{settings.pdf_base_url.rstrip('/')}/{filename}" if filename else ""
             page = p.get("page", 0)
+            raw_vec = point.vector
+            dense_vec = raw_vec["dense"] if isinstance(raw_vec, dict) else raw_vec
             candidates.append({
                 "text":            p.get("text", ""),
                 "doc_title":       p.get("doc_title", ""),
@@ -387,7 +530,7 @@ class Retriever:
                 "section_title":   p.get("section_title", ""),
                 "paragraph_range": p.get("paragraph_range", ""),
                 "score":           point.score,
-                "_vector":         point.vector,
+                "_vector":         dense_vec,
             })
 
         # Resolve profile-derived inputs once per call

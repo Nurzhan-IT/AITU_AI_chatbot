@@ -98,6 +98,23 @@ class Settings(BaseSettings):
             self.triage_ambiguous_doc_spread,
         ))
 
+    # --- Hybrid retrieval: BM25 + dense fusion (§4.2 E2) ---------------------
+    # Master switch.  Set HYBRID_SEARCH_ENABLED=true in .env to enable.
+    # IMPORTANT: changing this flag requires a full re-index of all documents
+    # (the Qdrant collection schema must be rebuilt to include sparse vectors).
+    # Run: python -m ingestion.ingest --dir pdfs/
+    hybrid_search_enabled: bool = False
+
+    # BM25 hyperparameters (Robertson BM25).  Defaults are well-established;
+    # only tune if you have evaluation data showing improvement.
+    bm25_k1: float = Field(default=1.5, ge=0.1, le=5.0)
+    bm25_b: float  = Field(default=0.75, ge=0.0, le=1.0)
+
+    # Path to the JSON file storing corpus-level BM25 statistics
+    # (total_chunks, avg_len, per-term document frequency).
+    # Updated automatically during ingestion; must be regenerated after re-index.
+    bm25_stats_path: str = "data/bm25_stats.json"
+
     # Duplicate / stale detection
     duplicate_threshold: float = Field(default=0.90, ge=0.0, le=1.0)
     stale_threshold_low: float = Field(default=0.75, ge=0.0, le=1.0)

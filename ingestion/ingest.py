@@ -16,7 +16,14 @@ from ingestion.page_classifier import classify_document, PageType
 from ingestion.page_processor import process_page
 from ingestion.post_processor import postprocess
 from qdrant_client import AsyncQdrantClient
-from qdrant_client.models import Distance, PointStruct, VectorParams
+from qdrant_client.models import (
+    Distance,
+    PointStruct,
+    SparseIndexParams,
+    SparseVector,
+    SparseVectorParams,
+    VectorParams,
+)
 
 from config import settings, TZ_UTC5
 from rag.embedder import Embedder
@@ -282,20 +289,68 @@ async def _ensure_collection(client: AsyncQdrantClient) -> None:
     exists = await client.collection_exists(settings.qdrant_collection)
     if exists:
         info = await client.get_collection(settings.qdrant_collection)
-        existing_size = info.config.params.vectors.size
-        if existing_size != _VECTOR_SIZE:
-            logger.warning(
-                "Collection '%s' has vector size %d, expected %d — recreating.",
-                settings.qdrant_collection, existing_size, _VECTOR_SIZE,
+        need_recreate = False
+
+        if settings.hybrid_search_enabled:
+            # Hybrid schema: named dense vector + sparse vector.
+            named = isinstance(info.config.params.vectors, dict)
+            has_dense = named and "dense" in info.config.params.vectors
+            dense_ok = (
+                has_dense and info.config.params.vectors["dense"].size == _VECTOR_SIZE
             )
+            has_sparse = bool(
+                info.config.params.sparse_vectors
+                and "sparse" in info.config.params.sparse_vectors
+            )
+            if not (dense_ok and has_sparse):
+                logger.warning(
+                    "Collection '%s' schema is incompatible with hybrid search "
+                    "(dense_ok=%s, has_sparse=%s) — recreating. "
+                    "Re-index all documents after this run.",
+                    settings.qdrant_collection, dense_ok, has_sparse,
+                )
+                need_recreate = True
+        else:
+            # Dense-only schema: single unnamed VectorParams.
+            if isinstance(info.config.params.vectors, dict):
+                # Collection has named vectors but hybrid is disabled — mismatched state.
+                logger.warning(
+                    "Collection '%s' uses named vectors but HYBRID_SEARCH_ENABLED=false "
+                    "— recreating for clean state. Re-index all documents.",
+                    settings.qdrant_collection,
+                )
+                need_recreate = True
+            else:
+                existing_size = info.config.params.vectors.size
+                if existing_size != _VECTOR_SIZE:
+                    logger.warning(
+                        "Collection '%s' has vector size %d, expected %d — recreating.",
+                        settings.qdrant_collection, existing_size, _VECTOR_SIZE,
+                    )
+                    need_recreate = True
+
+        if need_recreate:
             await client.delete_collection(settings.qdrant_collection)
             exists = False
+
     if not exists:
-        await client.create_collection(
-            collection_name=settings.qdrant_collection,
-            vectors_config=VectorParams(size=_VECTOR_SIZE, distance=Distance.COSINE),
+        if settings.hybrid_search_enabled:
+            await client.create_collection(
+                collection_name=settings.qdrant_collection,
+                vectors_config={"dense": VectorParams(size=_VECTOR_SIZE, distance=Distance.COSINE)},
+                sparse_vectors_config={"sparse": SparseVectorParams(
+                    index=SparseIndexParams(on_disk=False)
+                )},
+            )
+        else:
+            await client.create_collection(
+                collection_name=settings.qdrant_collection,
+                vectors_config=VectorParams(size=_VECTOR_SIZE, distance=Distance.COSINE),
+            )
+        logger.info(
+            "Created collection '%s' (hybrid=%s)",
+            settings.qdrant_collection, settings.hybrid_search_enabled,
         )
-        logger.info("Created collection '%s'", settings.qdrant_collection)
 
 
 # ---------------------------------------------------------------------------
@@ -343,6 +398,19 @@ async def ingest_pdf(
 
     await _ensure_collection(client)
 
+    # BM25 sparse vectors (hybrid mode only)
+    bm25_token_lists: list[list[str]] = []
+    if settings.hybrid_search_enabled:
+        from pathlib import Path as _Path
+        from rag.bm25 import BM25Stats, tokenize as bm25_tokenize
+        bm25_stats = BM25Stats.load(_Path(settings.bm25_stats_path))
+        bm25_token_lists = [bm25_tokenize(t) for t in clean_texts]
+        # Register new chunks into stats so avg_len reflects this batch.
+        # avg_len is used below to compute the TF component, so populate stats
+        # before building doc vectors.
+        for tokens in bm25_token_lists:
+            bm25_stats.add_chunk(tokens)
+
     points: list[PointStruct] = []
 
     uploaded_at = datetime.now(TZ_UTC5).isoformat()
@@ -374,10 +442,26 @@ async def ingest_pdf(
     vectors = await embedder.embed_passages(clean_texts)
     await _notify(progress_cb, "💾 Сохраняю в базу...")
 
-    for point, vector in zip(points, vectors):
-        point.vector = vector
+    if settings.hybrid_search_enabled:
+        from rag.bm25 import bm25_doc_vector
+        avg_len = bm25_stats.avg_len
+        for point, dense_vec, tokens in zip(points, vectors, bm25_token_lists):
+            sp_indices, sp_values = bm25_doc_vector(
+                tokens, avg_len, settings.bm25_k1, settings.bm25_b
+            )
+            point.vector = {
+                "dense": dense_vec,
+                "sparse": SparseVector(indices=sp_indices, values=sp_values),
+            }
+    else:
+        for point, vector in zip(points, vectors):
+            point.vector = vector
 
     await client.upsert(collection_name=settings.qdrant_collection, points=points)
+
+    if settings.hybrid_search_enabled:
+        bm25_stats.save(_Path(settings.bm25_stats_path))
+        logger.info("BM25 stats updated: %d total chunks", bm25_stats.total_chunks)
     logger.info(
         "Upserted %d chunks for '%s' into collection '%s'",
         len(points),
