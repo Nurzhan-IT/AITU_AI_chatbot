@@ -272,11 +272,9 @@ async def _proceed_to_search(message: Message, state: FSMContext) -> None:
     # Local imports to avoid an import-time cycle with bot.handlers.user
     from bot.handlers.user import (
         MAX_TG_LEN,
-        _build_keyboard,
-        _build_sources_text,
-        _disclaimer,
+        _NO_PREVIEW,
+        _format_answer,
         _generator,
-        _md_to_html,
         _retriever,
         send_long_message,
     )
@@ -365,25 +363,10 @@ async def _proceed_to_search(message: Message, state: FSMContext) -> None:
         classification_reason=classification_reason,
     )
 
-    import html as _html
-    text = f"💬 {_md_to_html(result['answer'])}"
-    sources = result["sources"]
-    if sources:
-        text += "\n\n📄 Источники:\n"
-        text += _build_sources_text(sources)
-    text += "\n\n" + _html.escape(_disclaimer(result["detected_lang"]))
-
-    keyboard = _build_keyboard(sources)
+    text = _format_answer(result)
     if len(text) <= MAX_TG_LEN:
-        fb_kb = feedback_keyboard(log_id)
-        combined = (
-            InlineKeyboardMarkup(
-                inline_keyboard=keyboard.inline_keyboard + fb_kb.inline_keyboard
-            )
-            if keyboard
-            else fb_kb
-        )
-        await status_msg.edit_text(text, reply_markup=combined, parse_mode="HTML")
+        await status_msg.edit_text(text, reply_markup=feedback_keyboard(log_id),
+                                   parse_mode="HTML", link_preview_options=_NO_PREVIEW)
     else:
         await status_msg.delete()
         await send_long_message(message, text, reply_markup=feedback_keyboard(log_id))
