@@ -133,6 +133,31 @@ def _make_llm_client() -> Any:
         )
 
 
+# Groq honours strict JSON Schema (response_format type "json_schema") only on a
+# subset of models; the default llama-3.3-70b-versatile supports json_object mode
+# but not json_schema. Reasoning models (gpt-oss-*) are excluded here because the
+# classifier's small max_tokens budget would be spent on reasoning tokens.
+_GROQ_JSON_SCHEMA_MODELS = frozenset({
+    "moonshotai/kimi-k2-instruct-0905",
+    "meta-llama/llama-4-maverick-17b-128e-instruct",
+    "meta-llama/llama-4-scout-17b-16e-instruct",
+})
+
+
+def supports_json_schema() -> bool:
+    """Whether the configured provider/model accepts
+    response_format={"type": "json_schema", ...}.
+
+    OpenRouter forwards json_schema for any model; Groq honours it only for the
+    models in _GROQ_JSON_SCHEMA_MODELS.
+    """
+    if settings.llm_provider == "openrouter":
+        return True
+    if settings.llm_provider == "groq":
+        return settings.llm_model in _GROQ_JSON_SCHEMA_MODELS
+    return False
+
+
 MIN_CHUNK_SCORE = 0.55
 
 _FAQ_SYSTEM_PROMPT = """You are an assistant that creates FAQ entries for a university document.

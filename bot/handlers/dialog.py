@@ -152,7 +152,11 @@ async def _proceed_to_search(message: Message, state: FSMContext) -> None:
         _retriever,
         send_long_message,
     )
-    from bot.handlers.feedback import feedback_keyboard, log_query
+    from bot.handlers.feedback import (
+        clarification_feedback_keyboard,
+        feedback_keyboard,
+        log_query,
+    )
 
     status_msg = await message.answer("🔍 Ищу информацию...")
 
@@ -217,6 +221,16 @@ async def _proceed_to_search(message: Message, state: FSMContext) -> None:
     else:
         await status_msg.delete()
         await send_long_message(message, text, reply_markup=feedback_keyboard(log_id))
+
+    # Answers that actually went through a clarification dialog get a separate
+    # feedback prompt measuring whether the clarification itself helped (§4.5).
+    # Kept in its own message so clicking it never strips the answer's own
+    # thumbs up/down keyboard.
+    if rounds > 0:
+        await message.answer(
+            "💡 Помог ли уточняющий диалог найти ответ?",
+            reply_markup=clarification_feedback_keyboard(log_id),
+        )
 
 
 @router.callback_query(F.data.startswith("clarify:"))

@@ -161,6 +161,7 @@ async def init_db(db_path: str = "data/bot.db", log_path: str = "duplicate_detec
         for col, definition in [
             ("clarification_rounds", "INTEGER DEFAULT 0"),
             ("classification_reason", "TEXT"),
+            ("was_clarification_helpful", "INTEGER"),
         ]:
             try:
                 await db.execute(

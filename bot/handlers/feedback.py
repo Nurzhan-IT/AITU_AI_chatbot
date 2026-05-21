@@ -19,6 +19,15 @@ def feedback_keyboard(log_id: int) -> InlineKeyboardMarkup:
     ]])
 
 
+def clarification_feedback_keyboard(log_id: int) -> InlineKeyboardMarkup:
+    """Feedback row for answers that went through a clarification dialog —
+    captures whether the clarification step itself helped (§4.5)."""
+    return InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="👍 Уточнение помогло",    callback_data=f"cfb:good:{log_id}"),
+        InlineKeyboardButton(text="👎 Уточнение не помогло", callback_data=f"cfb:bad:{log_id}"),
+    ]])
+
+
 async def log_query(
     user_id: int,
     query: str,
@@ -81,4 +90,43 @@ async def handle_feedback(callback: CallbackQuery) -> None:
     logger.info(
         "Feedback log_id=%d rating=%d user=%s",
         log_id, rating, callback.from_user and callback.from_user.id,
+    )
+
+
+@router.callback_query(lambda c: c.data and c.data.startswith("cfb:"))
+async def handle_clarification_feedback(callback: CallbackQuery) -> None:
+    """Record whether a clarification dialog helped. Lives in its own message,
+    so it never strips the answer's regular thumbs up/down keyboard."""
+    parts = (callback.data or "").split(":")
+    if len(parts) != 3:
+        await callback.answer()
+        return
+    _, rating_str, log_id_str = parts
+    helpful = 1 if rating_str == "good" else 0
+    try:
+        log_id = int(log_id_str)
+    except ValueError:
+        await callback.answer()
+        return
+
+    async with aiosqlite.connect(settings.sqlite_db_path) as db:
+        cursor = await db.execute(
+            "UPDATE query_logs SET was_clarification_helpful = ? "
+            "WHERE id = ? AND was_clarification_helpful IS NULL",
+            (helpful, log_id),
+        )
+        await db.commit()
+        if cursor.rowcount == 0:
+            await callback.answer("Вы уже оценили уточнение.")
+            return
+
+    icon = "👍" if helpful else "👎"
+    await callback.answer(f"{icon} Спасибо за отзыв об уточнении!")
+    try:
+        await callback.message.edit_reply_markup(reply_markup=None)
+    except Exception:
+        pass
+    logger.info(
+        "Clarification feedback log_id=%d helpful=%d user=%s",
+        log_id, helpful, callback.from_user and callback.from_user.id,
     )

@@ -12,7 +12,7 @@ from typing import TypedDict
 
 from config import settings
 from rag.dialog.prompts import CLASSIFY_SYSTEM_PROMPT
-from rag.generator import _make_llm_client
+from rag.generator import _make_llm_client, supports_json_schema
 
 logger = logging.getLogger(__name__)
 
@@ -25,19 +25,43 @@ class ClassificationResult(TypedDict):
 
 _VALID_REASONS = {"specific", "vague_topic", "ambiguous"}
 
+# Strict JSON Schema for providers with structured-output support. It eliminates
+# the "model wrapped JSON in markdown" failure class at the source. Providers
+# without support fall back to brace-slicing the raw text response below.
+_CLASSIFY_JSON_SCHEMA = {
+    "name": "intent_classification",
+    "strict": True,
+    "schema": {
+        "type": "object",
+        "properties": {
+            "needs_clarification": {"type": "boolean"},
+            "reason": {"type": "string", "enum": sorted(_VALID_REASONS)},
+            "confidence": {"type": "number", "minimum": 0.0, "maximum": 1.0},
+        },
+        "required": ["needs_clarification", "reason", "confidence"],
+        "additionalProperties": False,
+    },
+}
+
 
 async def classify_intent(question: str) -> ClassificationResult:
     try:
         client = _make_llm_client()
-        response = await client.chat.completions.create(
-            model=settings.llm_model,
-            messages=[
+        request_kwargs = {
+            "model": settings.llm_model,
+            "messages": [
                 {"role": "system", "content": CLASSIFY_SYSTEM_PROMPT},
                 {"role": "user", "content": question},
             ],
-            temperature=0,
-            max_tokens=50,
-        )
+            "temperature": 0,
+            "max_tokens": 50,
+        }
+        if supports_json_schema():
+            request_kwargs["response_format"] = {
+                "type": "json_schema",
+                "json_schema": _CLASSIFY_JSON_SCHEMA,
+            }
+        response = await client.chat.completions.create(**request_kwargs)
         content = response.choices[0].message.content or ""
 
         start = content.find("{")

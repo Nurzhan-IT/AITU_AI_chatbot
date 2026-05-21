@@ -10,9 +10,10 @@ TZ_UTC5 = timezone(timedelta(hours=5))
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
 
-    # Telegram
-    telegram_token: str
-    admin_telegram_id: int
+    # Telegram — empty defaults so offline scripts/ tools can import config
+    # without a full bot .env; bot/main.py still needs a real token to start.
+    telegram_token: str = ""
+    admin_telegram_id: int = 0
 
     # LLM
     llm_provider: Literal["groq", "openrouter"] = "groq"
