@@ -98,15 +98,19 @@ def _normalize_options(raw_opts) -> list[str]:
 
 
 async def next_clarification(
-    state_data: dict, available_docs: list[dict]
+    state_data: dict,
+    available_docs: list[dict],
+    doc_summaries: dict[str, str] | None = None,
 ) -> ClarificationQuestion:
     try:
-        payload = {
+        payload: dict = {
             "original_query": state_data.get("original_query", ""),
             "rounds_done": state_data.get("rounds_done", 0),
             "answers": state_data.get("answers", []),
             "available_docs": list(available_docs)[:_MAX_DOCS_IN_PAYLOAD],
         }
+        if doc_summaries:
+            payload["doc_summaries"] = doc_summaries
         user_content = json.dumps(payload, ensure_ascii=False)
 
         client = _make_llm_client()

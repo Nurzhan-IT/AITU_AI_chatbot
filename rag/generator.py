@@ -281,6 +281,34 @@ Rules:
 """
 
 
+_DOC_SUMMARY_SYSTEM_PROMPT = """\
+You summarize university regulation documents for a Q&A assistant. \
+Write exactly 1–2 sentences in Russian describing what this document covers: \
+its main topic, who it applies to, and what it regulates. \
+Be specific and concrete. \
+Output plain text only — no bullet points, no headers, no JSON.\
+"""
+
+
+async def generate_doc_summary(doc_title: str, text_excerpt: str) -> str:
+    """Generate a 1–2 sentence Russian description of a document from its opening text.
+
+    Used at ingestion time so clarification dialogs can present meaningful
+    document options to the user (§4.7).
+    """
+    client = _make_llm_client()
+    response = await client.chat.completions.create(
+        model=settings.llm_model,
+        messages=[
+            {"role": "system", "content": _DOC_SUMMARY_SYSTEM_PROMPT},
+            {"role": "user", "content": f"Документ: {doc_title}\n\nОтрывок:\n{text_excerpt}"},
+        ],
+        temperature=0.1,
+        max_tokens=150,
+    )
+    return (response.choices[0].message.content or "").strip()
+
+
 async def generate_document_faq(chunks: list[dict]) -> list[dict]:
     """Generate 10 FAQ entries from document chunks. Returns list of {question, answer}."""
     import json

@@ -388,6 +388,19 @@ async def ingest_pdf(
     from rag.dialog.question_gen import invalidate_docs_cache
     invalidate_docs_cache()
 
+    # Generate and persist a 1–2 sentence document summary (§4.7 / D3).
+    # Failures are logged and silently swallowed — indexing must not abort.
+    try:
+        from rag.generator import generate_doc_summary
+        from rag.dialog.summary_store import upsert_doc_summary
+        excerpt = "\n\n".join(clean_texts[:5])[:3000]
+        summary = await generate_doc_summary(title, excerpt)
+        if summary:
+            await upsert_doc_summary(filename, title, summary)
+            logger.info("Saved doc summary for '%s': %.100s", filename, summary)
+    except Exception:
+        logger.warning("Doc summary generation failed for '%s'; skipping", filename, exc_info=True)
+
     await embedder.aclose()
     await client.close()
     return len(points)

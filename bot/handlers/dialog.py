@@ -23,9 +23,80 @@ from config import settings
 from rag.dialog.enricher import enrich_and_profile
 from rag.dialog.question_gen import next_clarification, _get_cached_docs
 from rag.dialog.reranker import rerank_chunks
+from rag.dialog.summary_store import get_summaries_for_docs
 
 logger = logging.getLogger(__name__)
 router = Router()
+
+
+def _extract_doc_list(hits: list[dict]) -> list[dict]:
+    """Deduplicate (doc_title, section_title) pairs from probe hits."""
+    seen: set[tuple[str, str]] = set()
+    result: list[dict] = []
+    for h in hits:
+        doc_title = (h.get("doc_title") or "").strip()
+        section_title = (h.get("section_title") or "").strip()
+        if not doc_title:
+            continue
+        key = (doc_title, section_title)
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append({"doc_title": doc_title, "section_title": section_title})
+    return result
+
+
+# Stem lookup matching profile user_type values → text keywords (mirrors retriever.py).
+_FILTER_USER_TYPE_KEYWORDS: dict[str, str] = {
+    "бакалавр":   "бакалавр",
+    "магистрант": "магистр",
+    "сотрудник":  "сотрудник",
+}
+
+
+def _filter_chunks_by_profile(chunks: list[dict], profile: dict) -> list[dict]:
+    """Return the subset of probe chunks consistent with the user's clarification profile.
+
+    OR-based across criteria — a chunk is kept when ANY signal matches.
+    When no profile signals are present the full list is returned unchanged.
+
+    Priority order checked per chunk:
+      1. document_hints  → partial match in chunk doc_title
+      2. topics          → partial match in doc_title or section_title
+      3. user_type stem  → partial match in chunk text body
+    """
+    doc_hints = [
+        h.strip().lower() for h in (profile.get("document_hints") or [])
+        if isinstance(h, str) and h.strip()
+    ]
+    topics = [
+        t.strip().lower() for t in (profile.get("topics") or [])
+        if isinstance(t, str) and t.strip()
+    ]
+    user_stem = _FILTER_USER_TYPE_KEYWORDS.get(
+        str(profile.get("user_type") or "").lower(), ""
+    ).lower()
+
+    if not doc_hints and not topics and not user_stem:
+        return list(chunks)
+
+    result: list[dict] = []
+    for chunk in chunks:
+        doc_title     = (chunk.get("doc_title")     or "").lower()
+        section_title = (chunk.get("section_title") or "").lower()
+        text          = (chunk.get("text")          or "").lower()
+
+        if doc_hints and any(h in doc_title for h in doc_hints):
+            result.append(chunk)
+            continue
+        if topics and any(t in doc_title or t in section_title for t in topics):
+            result.append(chunk)
+            continue
+        if user_stem and user_stem in text:
+            result.append(chunk)
+            continue
+
+    return result
 
 _MAX_ROUNDS = 3
 _STOP_WORDS = {"не знаю", "неважно", "не важно", "idk", "whatever", "pass",
@@ -34,15 +105,18 @@ _OPTION_LABEL_LIMIT = 50
 
 
 async def _generate_question(state_data: dict) -> dict:
-    """LLM-driven next clarifying question, grounded in the cached doc list.
+    """LLM-driven next clarifying question, grounded in the top-15 probe hits.
 
-    Reuses the global Retriever from bot.handlers.user to avoid spawning a
-    second Qdrant client. Imported lazily to keep the dependency direction
-    one-way (user.py → dialog.py at call time only).
+    Uses probe_top15 and doc_summaries stored in FSM state (fetched once in
+    start_clarification_dialog). Falls back to the full cached corpus only when
+    FSM data is unavailable.
     """
-    from bot.handlers.user import _retriever
-    docs = await _get_cached_docs(_retriever)
-    return await next_clarification(state_data, docs)
+    docs = state_data.get("probe_top15") or []
+    if not docs:
+        from bot.handlers.user import _retriever
+        docs = await _get_cached_docs(_retriever)
+    doc_summaries: dict[str, str] = state_data.get("doc_summaries") or {}
+    return await next_clarification(state_data, docs, doc_summaries or None)
 
 
 def clarify_keyboard(round_no: int, options: list[str]) -> InlineKeyboardMarkup:
@@ -63,7 +137,23 @@ async def start_clarification_dialog(
     original_query: str,
     state: FSMContext,
     classification_reason: str | None = None,
+    probe_hits: list[dict] | None = None,
 ) -> None:
+    if not probe_hits:
+        from bot.handlers.user import _retriever
+        try:
+            raw_hits, _ = await _retriever.probe_search(original_query)
+            probe_hits = raw_hits
+        except Exception:
+            logger.warning("probe_search failed in start_clarification_dialog", exc_info=True)
+            probe_hits = []
+
+    probe_top15 = _extract_doc_list(probe_hits)
+
+    # Fetch pre-computed summaries for the probe documents (D3 §4.7).
+    unique_titles = list({h.get("doc_title", "") for h in probe_hits if h.get("doc_title")})
+    doc_summaries = await get_summaries_for_docs(unique_titles)
+
     await state.set_state(ClarifyDialog.waiting_for_answer)
     await state.update_data(
         original_query=original_query,
@@ -72,12 +162,17 @@ async def start_clarification_dialog(
         last_question="",
         last_options=[],
         classification_reason=classification_reason,
+        probe_top15=probe_top15,
+        probe_chunks=probe_hits,  # full chunk data reused in _proceed_to_search (D2)
+        doc_summaries=doc_summaries,
     )
 
     q = await _generate_question({
         "original_query": original_query,
         "rounds_done": 0,
         "answers": [],
+        "probe_top15": probe_top15,
+        "doc_summaries": doc_summaries,
     })
 
     if q.get("stop") or not q.get("question"):
@@ -127,15 +222,24 @@ def _profile_is_strong(profile: dict) -> bool:
 async def _proceed_to_search(message: Message, state: FSMContext) -> None:
     """Run the RAG pipeline after a clarification dialog.
 
-    Search uses an LLM-enriched query that fuses the original question with the
-    collected answers; the generator is still given the ORIGINAL question so the
-    user-facing answer matches how they asked it.
+    Stage 6–7 (D2): filter the probe_chunks stored in FSM by the user's profile
+    before falling back to a new retrieval call.
+
+    Fast path  — filtered probe chunks ≥ top_k → straight to generation (no
+                 new embed or Qdrant call).
+    Supplement — filtered < top_k but probe pool has extras → fill from the
+                 remaining probe chunks (reuses the probe fetch, no new embed).
+    Fallback   — probe pool exhausted or absent → original enriched-query search.
+
+    The generator always receives the ORIGINAL question so the answer matches
+    how the user phrased it.
     """
     data = await state.get_data()
     original_query = data.get("original_query", "")
     answers = data.get("answers", [])
     rounds = data.get("rounds_done", 0)
     classification_reason = data.get("classification_reason")
+    probe_chunks: list[dict] = data.get("probe_chunks") or []
     await state.clear()
 
     if not original_query:
@@ -166,17 +270,45 @@ async def _proceed_to_search(message: Message, state: FSMContext) -> None:
     logger.debug("enriched_query: %r (rounds=%d)", enriched, rounds)
     logger.info("Extracted profile: %s", profile)
 
-    try:
-        if _profile_is_strong(profile):
-            # Pull a wider candidate pool (10) for the LLM reranker to choose from.
-            chunks = await _retriever.search_with_profile(enriched, profile, k=10)
-            chunks = await rerank_chunks(original_query, chunks, k=settings.top_k)
+    # --- Stage 6/7: filter-first retrieval (D2) ----------------------------
+    chunks: list[dict] | None = None
+    if probe_chunks:
+        filtered = _filter_chunks_by_profile(probe_chunks, profile)
+        logger.info(
+            "D2 filter: probe=%d filtered=%d top_k=%d",
+            len(probe_chunks), len(filtered), settings.top_k,
+        )
+        if len(filtered) >= settings.top_k:
+            # Fast path: profile filter alone yields enough confirmed chunks.
+            chunks = filtered[: settings.top_k]
+            logger.debug("D2 fast path: %d probe chunks, no new retrieval", len(chunks))
         else:
-            chunks = await _retriever.search(enriched)
-    except Exception as e:
-        logger.error("Retrieval failed after clarification for user %s: %s", user_id, e)
-        await status_msg.edit_text("😔 Не удалось выполнить поиск. Попробуйте позже.")
-        return
+            # Supplement from the remaining probe chunks (probe vector reused,
+            # no new embed call — probe results are already in memory).
+            seen_texts = {c.get("text", "") for c in filtered}
+            extras = [c for c in probe_chunks if c.get("text", "") not in seen_texts]
+            merged = filtered + extras
+            if len(merged) >= settings.top_k:
+                chunks = merged[: settings.top_k]
+                logger.debug(
+                    "D2 supplement: %d filtered + %d probe extras = %d chunks",
+                    len(filtered), len(extras), len(chunks),
+                )
+            # else: probe pool too small → fall through to full search below
+
+    # --- Fallback: enriched-query search (original logic) ------------------
+    if chunks is None:
+        try:
+            if _profile_is_strong(profile):
+                # Pull a wider candidate pool (10) for the LLM reranker to choose from.
+                chunks = await _retriever.search_with_profile(enriched, profile, k=10)
+                chunks = await rerank_chunks(original_query, chunks, k=settings.top_k)
+            else:
+                chunks = await _retriever.search(enriched)
+        except Exception as e:
+            logger.error("Retrieval failed after clarification for user %s: %s", user_id, e)
+            await status_msg.edit_text("😔 Не удалось выполнить поиск. Попробуйте позже.")
+            return
 
     if chunks:
         logger.debug("Top chunk factor scores: %s", chunks[0].get("factor_scores"))

@@ -60,6 +60,9 @@ You will receive a JSON object with:
   answer means the user skipped or did not know.
 - "available_docs": a list of {"doc_title", "section_title"} pairs from the indexed \
   corpus. Use it to ground document-type clarifications in what actually exists.
+- "doc_summaries" (optional): object mapping doc_title → a 1–2 sentence description \
+  of what that document covers. When present, use it to write specific, meaningful \
+  option labels when asking the user which document they are interested in.
 
 Pick the clarification type that gives the most retrieval signal:
 1. Topic — narrow a broad subject (e.g. "academic side or administrative side?").

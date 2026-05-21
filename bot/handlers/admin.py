@@ -21,6 +21,7 @@ from config import settings, TZ_UTC5
 from ingestion.convert import convert_to_pdf
 from ingestion.ingest import ingest_pdf
 from rag.retriever import Retriever
+from rag.dialog.summary_store import delete_doc_summary
 from duplicate_detection import repository, detector
 
 logger = logging.getLogger(__name__)
@@ -438,6 +439,7 @@ async def cmd_delete(message: Message) -> None:
 
     await repository.record_file_event(filename, filename, "deleted", deleted)
     await clear_document_faq(filename)
+    await delete_doc_summary(filename)
 
     await message.answer(
         f"🗑️ Документ <code>{filename}</code> удалён.\n"
@@ -657,6 +659,7 @@ async def cb_delete_confirm(callback: CallbackQuery) -> None:
 
         await repository.record_file_event(filename, filename, "deleted", deleted)
         await clear_document_faq(filename)
+        await delete_doc_summary(filename)
         await callback.message.edit_text(
             f"✅ Документ <code>{filename}</code> удалён.\n"
             f"Удалено чанков: <b>{deleted}</b>",

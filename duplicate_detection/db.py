@@ -116,6 +116,16 @@ async def init_db(db_path: str = "data/bot.db", log_path: str = "duplicate_detec
         await db.commit()
 
         await db.executescript("""
+            CREATE TABLE IF NOT EXISTS doc_summaries (
+                filename   TEXT PRIMARY KEY,
+                doc_title  TEXT NOT NULL,
+                summary    TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
+        """)
+        await db.commit()
+
+        await db.executescript("""
 
             CREATE TABLE IF NOT EXISTS query_logs (
                 id            INTEGER PRIMARY KEY AUTOINCREMENT,
