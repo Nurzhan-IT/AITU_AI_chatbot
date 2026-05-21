@@ -158,6 +158,109 @@ def supports_json_schema() -> bool:
     return False
 
 
+# --- Triage rule-B verification (phase C3, §3.5 R1) -----------------------
+# A high top1 cosine score is not proof a chunk answers the query. Before the
+# triage cascade trusts a rule-B "specific" verdict and answers directly, this
+# one cheap LLM call confirms the single top1 chunk is actually on-point.
+
+_VERIFY_SYSTEM_PROMPT = """You are a relevance checker for a university Q&A assistant.
+
+You will receive a user QUESTION and a single document FRAGMENT that a vector \
+search ranked as the top match. Decide ONE thing: does the fragment contain \
+information that directly answers the question?
+
+- true  — the fragment directly answers the question (fully, or a clear part of it).
+- false — the fragment only shares a topic or keywords with the question, or \
+discusses a different matter; it does not actually answer it.
+
+The question and fragment may be in Russian, English, or Kazakh — judge them \
+equally regardless of language.
+
+Respond with ONLY a single JSON object on one line — no markdown, no commentary:
+{"answers_question": <true|false>}
+"""
+
+_VERIFY_JSON_SCHEMA = {
+    "name": "chunk_relevance",
+    "strict": True,
+    "schema": {
+        "type": "object",
+        "properties": {"answers_question": {"type": "boolean"}},
+        "required": ["answers_question"],
+        "additionalProperties": False,
+    },
+}
+
+# A retrieval chunk is ~400 tokens; 2000 chars covers a full chunk and caps
+# pathological outliers so the verification call stays cheap.
+_VERIFY_EXCERPT_LEN = 2000
+
+
+async def verify_chunk_answers_query(question: str, chunk: dict) -> bool:
+    """One cheap LLM call: does ``chunk`` actually answer ``question``?
+
+    Used by the triage cascade (phase C3, §3.5 R1) to confirm a rule-B
+    "specific" verdict before answering directly — a high cosine score alone is
+    not proof the chunk is on-point. Fails safe: an empty chunk or any error
+    returns False (treat as unconfirmed), so the caller demotes to the slower,
+    more thorough path rather than risk a wrong direct answer.
+    """
+    import json
+
+    text = (chunk.get("text") or "").replace("\n", " ").strip()
+    if not text:
+        return False
+    excerpt = text[:_VERIFY_EXCERPT_LEN]
+
+    doc_title = (chunk.get("doc_title") or "").strip()
+    section = (chunk.get("section_title") or "").strip()
+    header = f"{doc_title} — {section}" if doc_title and section else (doc_title or section)
+    user_content = (
+        f"QUESTION:\n{question}\n\n"
+        f"FRAGMENT{f' ({header})' if header else ''}:\n{excerpt}"
+    )
+
+    try:
+        client = _make_llm_client()
+        request_kwargs: dict = {
+            "model": settings.llm_model,
+            "messages": [
+                {"role": "system", "content": _VERIFY_SYSTEM_PROMPT},
+                {"role": "user", "content": user_content},
+            ],
+            "temperature": 0,
+            "max_tokens": 20,
+        }
+        if supports_json_schema():
+            request_kwargs["response_format"] = {
+                "type": "json_schema",
+                "json_schema": _VERIFY_JSON_SCHEMA,
+            }
+        response = await client.chat.completions.create(**request_kwargs)
+        content = response.choices[0].message.content or ""
+
+        start = content.find("{")
+        end = content.rfind("}") + 1
+        if start == -1 or end == 0:
+            raise ValueError(f"No JSON object in verifier response: {content!r}")
+        data = json.loads(content[start:end])
+        if "answers_question" not in data:
+            raise ValueError(f"Verifier response missing answers_question: {data!r}")
+
+        confirmed = bool(data["answers_question"])
+        logger.debug(
+            "verify_chunk_answers_query: q=%.60r doc=%.40r → confirmed=%s",
+            question, doc_title, confirmed,
+        )
+        return confirmed
+    except Exception:
+        logger.warning(
+            "verify_chunk_answers_query failed for q=%.80r; treating as unconfirmed",
+            question, exc_info=True,
+        )
+        return False
+
+
 MIN_CHUNK_SCORE = 0.55
 
 _FAQ_SYSTEM_PROMPT = """You are an assistant that creates FAQ entries for a university document.

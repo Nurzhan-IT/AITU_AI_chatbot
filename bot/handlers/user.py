@@ -28,6 +28,7 @@ from bot.keyboards.admin import admin_keyboard
 from bot.keyboards.user import user_keyboard
 from config import settings
 from rag.dialog.classifier import classify_intent
+from rag.dialog.triage import triage
 from rag.generator import Generator
 from rag.retriever import Retriever
 
@@ -51,6 +52,56 @@ def _is_rate_limited(user_id: int) -> bool:
         return True
     _user_timestamps[user_id].append(now)
     return False
+
+
+# ---------------------------------------------------------------------------
+# Shadow-mode triage (phase C, §3.2)
+# ---------------------------------------------------------------------------
+# The retrieval-grounded triage cascade runs OFF the hot path: a fire-and-forget
+# task logs its verdict next to the legacy classify_intent result for offline
+# comparison. It never affects the answer the user receives — wiring the verdict
+# into handler behavior is a later phase, gated by settings.triage_enabled.
+_shadow_triage_tasks: set[asyncio.Task] = set()
+
+
+def _fmt_feat(value) -> str:
+    """Render a possibly-missing / NaN feature value for a log line."""
+    if value is None:
+        return "-"
+    if isinstance(value, float):
+        return "nan" if value != value else f"{value:.3f}"
+    return str(value)
+
+
+def _spawn_shadow_triage(question: str, legacy: dict) -> None:
+    """Schedule a background triage run; keep a task ref so it is not GC'd."""
+    task = asyncio.create_task(_run_shadow_triage(question, dict(legacy)))
+    _shadow_triage_tasks.add(task)
+    task.add_done_callback(_shadow_triage_tasks.discard)
+
+
+async def _run_shadow_triage(question: str, legacy: dict) -> None:
+    try:
+        result = await triage(question, _retriever)
+    except Exception:
+        logger.warning("TRIAGE_SHADOW cascade crashed for q=%.80r", question, exc_info=True)
+        return
+    feats = result["features"]
+    agree = bool(result["needs_clarification"]) == bool(legacy.get("needs_clarification"))
+    logger.info(
+        "TRIAGE_SHADOW q=%.80r agree=%s | legacy needs=%s reason=%s | "
+        "triage needs=%s reason=%s by=%s rule=%s conf=%.2f | probe n=%s "
+        "top1=%s gap_ratio=%s entropy=%s doc_spread=%s vec=%s",
+        question, agree,
+        legacy.get("needs_clarification"), legacy.get("reason"),
+        result["needs_clarification"], result["reason"], result["decided_by"],
+        result["rule"] or "-", result["confidence"],
+        _fmt_feat(feats.get("n")), _fmt_feat(feats.get("top1")),
+        _fmt_feat(feats.get("gap_ratio")), _fmt_feat(feats.get("entropy")),
+        _fmt_feat(feats.get("doc_spread")),
+        "yes" if result["query_vector"] else "no",
+    )
+
 
 _START_TEXT = (
     "👋 Привет! Я университетский консультант-ассистент.\n\n"
@@ -306,6 +357,10 @@ async def handle_question(message: Message, state: FSMContext) -> None:
 
     intent = await classify_intent(question)
     logger.info("Intent classification: q='%.60s' result=%s", question, intent)
+
+    # Shadow-mode triage: logs a comparison verdict off the hot path, never
+    # changes the response. See _run_shadow_triage and rag/dialog/triage.py.
+    _spawn_shadow_triage(question, intent)
 
     if intent["needs_clarification"]:
         from bot.handlers.dialog import start_clarification_dialog

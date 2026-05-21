@@ -70,7 +70,9 @@ async def classify_intent(question: str) -> ClassificationResult:
             raise ValueError(f"No JSON object in classifier response: {content!r}")
 
         data = json.loads(content[start:end])
-        needs = bool(data.get("needs_clarification"))
+        if "needs_clarification" not in data:
+            raise ValueError(f"Classifier response missing 'needs_clarification': {data!r}")
+        needs = bool(data["needs_clarification"])
         reason = str(data.get("reason", "")).strip()
         if reason not in _VALID_REASONS:
             reason = "vague_topic" if needs else "specific"
@@ -94,8 +96,15 @@ async def classify_intent(question: str) -> ClassificationResult:
         return ClassificationResult(needs_clarification=needs, reason=reason, confidence=confidence)
     except Exception:
         logger.warning(
-            "classify_intent failed for q=%.80r; falling back to needs_clarification=False",
+            "classify_intent failed for q=%.80r; falling back to triage Stage 1 heuristics",
             question,
             exc_info=True,
         )
+        try:
+            from rag.dialog.triage import _STOPWORDS, _tokenize
+            tokens = _tokenize(question)
+            if len(tokens) <= 1 or all(t in _STOPWORDS for t in tokens):
+                return ClassificationResult(needs_clarification=True, reason="too_short", confidence=0.5)
+        except Exception:
+            logger.debug("classify_intent Stage 1 fallback also failed", exc_info=True)
         return ClassificationResult(needs_clarification=False, reason="error", confidence=0.5)

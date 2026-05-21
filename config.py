@@ -55,6 +55,49 @@ class Settings(BaseSettings):
     classify_conf_high: float = Field(default=0.7, ge=0.0, le=1.0)
     classify_conf_low: float = Field(default=0.4, ge=0.0, le=1.0)
 
+    # --- Retrieval-grounded triage (phase C, §3.2) ------------------------
+    # Master switch for the Stage 1–4 triage cascade (rag/dialog/triage.py).
+    # While False the cascade still runs in SHADOW mode — its verdict is logged
+    # next to the legacy classify_intent result but does NOT change handler
+    # behavior. Wiring the verdict into the hot path is a later phase.
+    triage_enabled: bool = False
+
+    # Stage 2 probe-retrieval depth (top-K pulled from Qdrant for triage).
+    triage_probe_k: int = Field(default=15, ge=5, le=50)
+
+    # Stage 3 score-distribution thresholds — scale-independent by design
+    # (§3.3): they describe the shape of the probe score distribution, not
+    # absolute cosine values, so they survive an embedder/corpus change.
+    #
+    # CALIBRATION (task C2, §3.3 / §3.5 R2): these MUST be read off real
+    # percentiles, never set to round numbers — the §3.3 illustrative constants
+    # (0.80 / 0.15 / 0.70 / 0.50) make rules A and B fire essentially never on
+    # the e5 embedder. To calibrate, run on the bot host:
+    #     python -m scripts.score_distribution      # writes the phase-B CSV
+    #     python -m scripts.recalibrate_triage --write
+    # recalibrate_triage.py then replaces the None defaults below with
+    # percentile-derived values and stamps a "# Calibrated <date> ..." marker.
+    #
+    # While ANY of them is None, `triage_calibrated` is False and Stage 3
+    # always returns rule D — an uncalibrated deploy behaves exactly like the
+    # legacy LLM-only path. Rule A (out_of_scope) has no separate threshold:
+    # it reuses `min_chunk_score` as the shared noise floor (§3.3 point 3).
+    triage_specific_gap_ratio: float | None = Field(default=None, ge=0.0)
+    triage_specific_max_entropy: float | None = Field(default=None, ge=0.0, le=1.0)
+    triage_ambiguous_min_entropy: float | None = Field(default=None, ge=0.0, le=1.0)
+    triage_ambiguous_doc_spread: int | None = Field(default=None, ge=1)
+
+    @property
+    def triage_calibrated(self) -> bool:
+        """True only when every Stage-3 threshold has a calibrated value.
+        Until then rag/dialog/triage.py keeps Stage 3 pinned to rule D."""
+        return all(v is not None for v in (
+            self.triage_specific_gap_ratio,
+            self.triage_specific_max_entropy,
+            self.triage_ambiguous_min_entropy,
+            self.triage_ambiguous_doc_spread,
+        ))
+
     # Duplicate / stale detection
     duplicate_threshold: float = Field(default=0.90, ge=0.0, le=1.0)
     stale_threshold_low: float = Field(default=0.75, ge=0.0, le=1.0)

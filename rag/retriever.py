@@ -233,6 +233,52 @@ class Retriever:
         logger.debug("search('%s'): %d hits", query[:60], len(hits))
         return hits
 
+    async def probe_search(
+        self, query: str, k: int | None = None
+    ) -> tuple[list[dict], list[float]]:
+        """Raw top-K probe search for triage (phase C, §3.2 Stage 2).
+
+        Unlike :meth:`search`, this applies NO MMR re-ranking and does NOT cap
+        the result at ``top_k`` — Stage 3 triage needs the undistorted Qdrant
+        score distribution. Hits come back in descending score order.
+
+        Returns ``(hits, query_vector)``. The query embedding is handed back so
+        the caller can reuse it for the final retrieval (Stage 6) instead of
+        paying for a second embed call (§3.5 R3).
+        """
+        await self._ensure_collection()
+
+        vector = await self._embedder.embed_query(query)
+        limit = k if k is not None else settings.triage_probe_k
+        results = await self._client.search(
+            collection_name=settings.qdrant_collection,
+            query_vector=vector,
+            limit=limit,
+            with_payload=True,
+            with_vectors=False,
+        )
+
+        hits: list[dict] = []
+        for point in results:
+            p = point.payload or {}
+            filename = p.get("filename", "")
+            url = f"{settings.pdf_base_url.rstrip('/')}/{filename}" if filename else ""
+            page = p.get("page", 0)
+            hits.append({
+                "text": p.get("text", ""),
+                "doc_title": p.get("doc_title", ""),
+                "filename": filename,
+                "url": url,
+                "uploaded_at": p.get("uploaded_at", ""),
+                "page": page,
+                "page_end": p.get("page_end", page),
+                "section_title": p.get("section_title", ""),
+                "paragraph_range": p.get("paragraph_range", ""),
+                "score": point.score,
+            })
+        logger.debug("probe_search('%s'): %d hits (k=%d)", query[:60], len(hits), limit)
+        return hits, vector
+
     async def search_multilingual(
         self,
         question: str,
