@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import re
 from collections import defaultdict
 from typing import Any
 
@@ -43,8 +44,10 @@ _SYSTEM_PROMPT = """You are a university consultation assistant for AITU (Astana
 
 Rules:
 1. Answer ONLY based on the provided document fragments. Do not use outside knowledge.
-2. ALWAYS cite the source using the document title, section, and page number from the fragment
-   headers. For English documents use "Section X, p.Y"; for Russian documents use "п.X, стр.Y".
+2. ALWAYS cite the source inline using plain square-bracket numbers matching the fragment index,
+   e.g. [1], [2], [3]. For Russian documents write "п.X, стр.Y"; for English "Section X, p.Y".
+   FORBIDDEN citation styles: 【】, †, ※, ⟨⟩, or any other special Unicode brackets/symbols.
+   Use ONLY plain ASCII square brackets: [1], [2], etc.
 3. Quote exact figures: dates, deadlines, counts, thresholds — do not paraphrase numbers.
 4. Use official terms as they appear in the documents.
 5. If the question cannot be answered from the provided fragments, write exactly [NO_ANSWER] as
@@ -136,27 +139,56 @@ def _make_llm_client() -> Any:
 
 # Groq honours strict JSON Schema (response_format type "json_schema") only on a
 # subset of models; the default llama-3.3-70b-versatile supports json_object mode
-# but not json_schema. Reasoning models (gpt-oss-*) are excluded here because the
-# classifier's small max_tokens budget would be spent on reasoning tokens.
+# but not json_schema. Reasoning models (gpt-oss-*) are excluded everywhere because
+# their internal reasoning tokens exhaust the classifier's small max_tokens budget,
+# leaving no room for visible output (content becomes '').
 _GROQ_JSON_SCHEMA_MODELS = frozenset({
     "moonshotai/kimi-k2-instruct-0905",
     "meta-llama/llama-4-maverick-17b-128e-instruct",
     "meta-llama/llama-4-scout-17b-16e-instruct",
 })
 
+# OpenRouter reasoning models that consume tokens on hidden chain-of-thought and
+# do not reliably honour json_schema structured output.
+_OPENROUTER_REASONING_MODELS = frozenset({
+    "openai/gpt-oss-120b",
+    "openai/gpt-oss-20b",
+    "openai/o1",
+    "openai/o1-mini",
+    "openai/o3",
+    "openai/o3-mini",
+    "openai/o4-mini",
+})
+
+
+def _is_reasoning_model() -> bool:
+    """True for models whose internal reasoning tokens exhaust small token budgets."""
+    model = settings.llm_model
+    if settings.llm_provider == "openrouter":
+        return model in _OPENROUTER_REASONING_MODELS or model.startswith("openai/gpt-oss-")
+    return False
+
 
 def supports_json_schema() -> bool:
     """Whether the configured provider/model accepts
     response_format={"type": "json_schema", ...}.
 
-    OpenRouter forwards json_schema for any model; Groq honours it only for the
-    models in _GROQ_JSON_SCHEMA_MODELS.
+    OpenRouter forwards json_schema only for models that support it natively.
+    Reasoning models (gpt-oss-*) are excluded — they return empty content when
+    the token budget is too small for hidden reasoning + visible JSON output.
     """
     if settings.llm_provider == "openrouter":
-        return True
+        return not _is_reasoning_model()
     if settings.llm_provider == "groq":
         return settings.llm_model in _GROQ_JSON_SCHEMA_MODELS
     return False
+
+
+def supports_json_object() -> bool:
+    """Whether the configured provider/model accepts
+    response_format={"type": "json_object"}.
+    """
+    return settings.llm_provider in ("groq", "openrouter")
 
 
 # --- Triage rule-B verification (phase C3, §3.5 R1) -----------------------
@@ -263,6 +295,14 @@ async def verify_chunk_answers_query(question: str, chunk: dict) -> bool:
             question, exc_info=True,
         )
         return False
+
+
+_CITATION_JUNK_RE = re.compile(r"【[^】]*】|〔[^〕]*〕|⟨[^⟩]*⟩|\†|\※")
+
+
+def _strip_citation_artifacts(text: str) -> str:
+    """Remove LLM citation markers that use non-standard Unicode brackets."""
+    return _CITATION_JUNK_RE.sub("", text)
 
 
 MIN_CHUNK_SCORE = 0.55
@@ -391,6 +431,8 @@ class Generator:
 
         context = _build_context(chunks)
         answer = await self._call_llm(question, context=context, detected_lang=detected_lang)
+
+        answer = _strip_citation_artifacts(answer)
 
         if answer.lstrip().startswith(_NO_ANSWER_MARKER):
             answer = answer.lstrip()[len(_NO_ANSWER_MARKER):].strip()

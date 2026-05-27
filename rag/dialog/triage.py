@@ -279,7 +279,7 @@ async def _llm_verdict(question: str, probe_hits: list[dict]) -> tuple[bool, str
     # Lazy imports: keep triage.py importable in offline/script contexts and
     # avoid import-order coupling with the LLM client.
     from rag.dialog.classifier import _CLASSIFY_JSON_SCHEMA, _VALID_REASONS, _describe_choice
-    from rag.generator import _make_llm_client, supports_json_schema
+    from rag.generator import _make_llm_client, supports_json_object, supports_json_schema
 
     context = _format_probe_context(probe_hits)
     user_content = f"{question}\n\n{context}" if context else question
@@ -299,6 +299,8 @@ async def _llm_verdict(question: str, probe_hits: list[dict]) -> tuple[bool, str
             "type": "json_schema",
             "json_schema": _CLASSIFY_JSON_SCHEMA,
         }
+    elif supports_json_object():
+        request_kwargs["response_format"] = {"type": "json_object"}
     response = await asyncio.wait_for(
         client.chat.completions.create(**request_kwargs),
         timeout=6.0,

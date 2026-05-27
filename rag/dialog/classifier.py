@@ -16,7 +16,7 @@ from typing import Optional, TypedDict
 
 from config import settings
 from rag.dialog.prompts import CLASSIFY_SYSTEM_PROMPT
-from rag.generator import _make_llm_client, supports_json_schema
+from rag.generator import _make_llm_client, _is_reasoning_model, supports_json_object, supports_json_schema
 
 logger = logging.getLogger(__name__)
 
@@ -143,6 +143,8 @@ async def classify_intent(question: str) -> ClassificationResult:
                 "type": "json_schema",
                 "json_schema": _CLASSIFY_JSON_SCHEMA,
             }
+        elif supports_json_object():
+            request_kwargs["response_format"] = {"type": "json_object"}
         response = await asyncio.wait_for(
             client.chat.completions.create(**request_kwargs),
             timeout=6.0,
