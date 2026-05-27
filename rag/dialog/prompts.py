@@ -3,9 +3,21 @@
 This module hosts the system-prompt constants used by the dialog pipeline
 (intent classification, clarifying-question generation, query enrichment,
 profile extraction, and reranking).
+
+All prompts that reason about academic calendars, courses, or trimesters are
+grounded in ``rag.university_facts.AITU_FACTS`` so the model relies on a
+single, authoritative description of AITU's structure instead of guessing.
 """
 
-CLASSIFY_SYSTEM_PROMPT = """You are an intent classifier for a university Q&A assistant. \
+from rag.university_facts import AITU_FACTS
+
+_FACTS_BLOCK = (
+    "BACKGROUND — AITU structural facts you may rely on (treat as ground truth, "
+    "do NOT contradict, do NOT invent extra courses or trimesters):\n"
+    f"{AITU_FACTS}\n"
+)
+
+_CLASSIFY_BODY = """You are an intent classifier for a university Q&A assistant. \
 The user has asked a single question. Decide whether the assistant should search the \
 knowledge base immediately, or first ask 1–3 clarifying questions.
 
@@ -60,8 +72,10 @@ no extra fields:
 {"needs_clarification": <true|false>, "reason": "<specific|vague_topic|ambiguous>", "confidence": <0.0–1.0>}
 """
 
+CLASSIFY_SYSTEM_PROMPT = _FACTS_BLOCK + "\n" + _CLASSIFY_BODY
 
-QUESTION_GEN_SYSTEM_PROMPT = """You are a clarification-question generator for a \
+
+_QUESTION_GEN_BODY = """You are a clarification-question generator for a \
 university Q&A assistant.
 
 The user has asked an initial question that may be too vague or ambiguous. Your job \
@@ -106,10 +120,17 @@ commentary, no extra fields:
 If you decide the dialog should stop immediately, return \
 {"question": "", "options": [], "stop": true} — the assistant will fall through to \
 search using the original query.
+
+When you ask about course or trimester, ground options in the AITU structural facts \
+above — e.g. for a bachelor offer "1 курс / 2 курс / 3 курс" (NOT "4 курс"); for a \
+master offer "1 курс / 2 курс"; when calendar matters ask whether it is regular or \
+winter admission, because the trimester order differs between the two.
 """
 
+QUESTION_GEN_SYSTEM_PROMPT = _FACTS_BLOCK + "\n" + _QUESTION_GEN_BODY
 
-ENRICH_SYSTEM_PROMPT = """You are a search-query enricher for a university Q&A \
+
+_ENRICH_BODY = """You are a search-query enricher for a university Q&A \
 assistant.
 
 You will receive:
@@ -140,8 +161,10 @@ Example:
 - output: льготы на проживание в общежитии для студентов бакалавриата 2024-2025
 """
 
+ENRICH_SYSTEM_PROMPT = _FACTS_BLOCK + "\n" + _ENRICH_BODY
 
-ENRICH_AND_PROFILE_SYSTEM_PROMPT = """You are a search-query enricher AND profile \
+
+_ENRICH_AND_PROFILE_BODY = """You are a search-query enricher AND profile \
 extractor for a university Q&A assistant.
 
 You will receive:
@@ -173,8 +196,10 @@ Example:
   "document_hints": [], "temporal_context": null}}}}
 """
 
+ENRICH_AND_PROFILE_SYSTEM_PROMPT = _FACTS_BLOCK + "\n" + _ENRICH_AND_PROFILE_BODY
 
-EXTRACT_PROFILE_SYSTEM_PROMPT = """You are a profile extractor for a university Q&A \
+
+_EXTRACT_PROFILE_BODY = """You are a profile extractor for a university Q&A \
 assistant.
 
 You will receive:
@@ -213,8 +238,10 @@ Respond with ONLY a single JSON object on one line — no markdown fences, no \
 commentary, no extra fields.
 """
 
+EXTRACT_PROFILE_SYSTEM_PROMPT = _FACTS_BLOCK + "\n" + _EXTRACT_PROFILE_BODY
 
-FOLLOWUP_SYSTEM_PROMPT = """You are a follow-up detector for a university Q&A bot.
+
+_FOLLOWUP_BODY = """You are a follow-up detector for a university Q&A bot.
 
 You will receive:
 - "last_turn_context": a brief description of what the user just asked, including the
@@ -252,6 +279,8 @@ If it is NOT a follow-up:
 Respond with ONLY a single JSON object on one line — no markdown, no commentary:
 {"is_followup": <true|false>, "merged_query": "<str>", "profile_patch": {}}
 """
+
+FOLLOWUP_SYSTEM_PROMPT = _FACTS_BLOCK + "\n" + _FOLLOWUP_BODY
 
 
 RERANK_SYSTEM_PROMPT = """You are a relevance reranker for a university Q&A retrieval \
