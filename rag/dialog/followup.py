@@ -6,6 +6,7 @@ lightweight LLM call decides whether the new message is a follow-up (reuse conte
 or a new independent query (classify from scratch).
 """
 
+import asyncio
 import json
 import logging
 from dataclasses import dataclass, field
@@ -107,6 +108,7 @@ async def check_followup(
         return False, new_message, _empty_profile()
 
     try:
+        from rag.dialog.classifier import _describe_choice
         from rag.dialog.prompts import FOLLOWUP_SYSTEM_PROMPT
         from rag.generator import _make_llm_client
 
@@ -124,21 +126,28 @@ async def check_followup(
         )
 
         client = _make_llm_client()
-        response = await client.chat.completions.create(
-            model=settings.llm_model,
-            messages=[
-                {"role": "system", "content": FOLLOWUP_SYSTEM_PROMPT},
-                {"role": "user", "content": user_content},
-            ],
-            temperature=0,
-            max_tokens=150,
+        response = await asyncio.wait_for(
+            client.chat.completions.create(
+                model=settings.llm_model,
+                messages=[
+                    {"role": "system", "content": FOLLOWUP_SYSTEM_PROMPT},
+                    {"role": "user", "content": user_content},
+                ],
+                temperature=0,
+                max_tokens=300,
+            ),
+            timeout=5.0,
         )
-        content = response.choices[0].message.content or ""
+        choice = response.choices[0]
+        content = choice.message.content or ""
 
         start = content.find("{")
         end = content.rfind("}") + 1
         if start == -1 or end == 0:
-            raise ValueError(f"No JSON in followup check response: {content!r}")
+            raise ValueError(
+                f"No JSON in followup check response: {content!r} "
+                f"[{_describe_choice(choice)}]"
+            )
 
         data = json.loads(content[start:end])
         is_followup = bool(data.get("is_followup", False))

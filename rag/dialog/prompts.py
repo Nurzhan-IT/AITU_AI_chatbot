@@ -15,12 +15,22 @@ document, procedure, fee, deadline, or a clearly-defined fact) → no clarificat
 - If the question is VAGUE (a broad topic with no specific aspect, e.g. "tell me about \
 the rules") or AMBIGUOUS (it could plausibly refer to several different things, e.g. \
 "what benefits are there?") → clarification is needed.
+- PROFILE-DEPENDENT FACTS ARE AMBIGUOUS. If the requested fact (a date, deadline, \
+fee, requirement, schedule, exam window, trimester boundary, etc.) plausibly has \
+DIFFERENT VALUES depending on the user's degree level (bachelor / master / PhD / \
+staff), specific program or specialty, academic year, course, group, or admission \
+cohort — and the user did NOT pin those down — mark it "ambiguous" so the assistant \
+can ask which profile applies. Naming the topic and the time window alone is NOT \
+enough when the answer differs per program/level/year. Calendar items at AITU \
+(дедлайны, рубежный контроль, сессия, экзамены, триместры) are profile-dependent \
+by default — treat them as "ambiguous" unless the user pins the program/level/year.
 
 Reason codes (use exactly one):
 - "specific"     — the question is concrete and ready to search.
 - "vague_topic"  — the question names a very broad topic without any specific aspect.
 - "ambiguous"    — the question could refer to multiple different things and you cannot \
-                   tell which one the user means.
+                   tell which one the user means (INCLUDING profile-dependent facts \
+                   where the user has not pinned program / level / year).
 
 The question may be written in Russian, English, or Kazakh. Treat all three languages \
 equally — never demand a language switch and never let the language affect the verdict.
@@ -39,6 +49,11 @@ Examples:
 - "Жатақханаға қалай өтініш беруге болады?" → {"needs_clarification": false, "reason": "specific", "confidence": 0.88}
 - "Расскажи про академическую политику" → {"needs_clarification": true, "reason": "vague_topic", "confidence": 0.87}
 - "Какие скидки на оплату обучения существуют?" → {"needs_clarification": true, "reason": "ambiguous", "confidence": 0.8}
+- "Когда рубежный контроль для первого триместра?" → {"needs_clarification": true, "reason": "ambiguous", "confidence": 0.85}
+- "Когда сессия?" → {"needs_clarification": true, "reason": "ambiguous", "confidence": 0.9}
+- "When does the first trimester start?" → {"needs_clarification": true, "reason": "ambiguous", "confidence": 0.85}
+- "Какой дедлайн по оплате обучения?" → {"needs_clarification": true, "reason": "ambiguous", "confidence": 0.8}
+- "Когда рубежный контроль для магистрантов 1 курса осеннего триместра 2024-2025?" → {"needs_clarification": false, "reason": "specific", "confidence": 0.92}
 
 Respond with ONLY a single JSON object on one line — no markdown fences, no commentary, \
 no extra fields:

@@ -1,3 +1,4 @@
+import asyncio
 import logging
 from collections import defaultdict
 from typing import Any
@@ -236,7 +237,10 @@ async def verify_chunk_answers_query(question: str, chunk: dict) -> bool:
                 "type": "json_schema",
                 "json_schema": _VERIFY_JSON_SCHEMA,
             }
-        response = await client.chat.completions.create(**request_kwargs)
+        response = await asyncio.wait_for(
+            client.chat.completions.create(**request_kwargs),
+            timeout=5.0,
+        )
         content = response.choices[0].message.content or ""
 
         start = content.find("{")
@@ -420,6 +424,7 @@ class Generator:
                     {"role": "user", "content": user_content},
                 ],
                 temperature=0.2,
+                max_tokens=1500,
             )
             return response.choices[0].message.content or ""
         except Exception as e:

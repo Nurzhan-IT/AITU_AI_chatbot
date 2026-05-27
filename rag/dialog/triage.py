@@ -34,6 +34,7 @@ phase can reuse them for the final retrieval without a second embed call
 (§3.5 R3).
 """
 
+import asyncio
 import json
 import logging
 import math
@@ -277,7 +278,7 @@ async def _llm_verdict(question: str, probe_hits: list[dict]) -> tuple[bool, str
     """
     # Lazy imports: keep triage.py importable in offline/script contexts and
     # avoid import-order coupling with the LLM client.
-    from rag.dialog.classifier import _CLASSIFY_JSON_SCHEMA, _VALID_REASONS
+    from rag.dialog.classifier import _CLASSIFY_JSON_SCHEMA, _VALID_REASONS, _describe_choice
     from rag.generator import _make_llm_client, supports_json_schema
 
     context = _format_probe_context(probe_hits)
@@ -291,20 +292,27 @@ async def _llm_verdict(question: str, probe_hits: list[dict]) -> tuple[bool, str
             {"role": "user", "content": user_content},
         ],
         "temperature": 0,
-        "max_tokens": 50,
+        "max_tokens": 300,
     }
     if supports_json_schema():
         request_kwargs["response_format"] = {
             "type": "json_schema",
             "json_schema": _CLASSIFY_JSON_SCHEMA,
         }
-    response = await client.chat.completions.create(**request_kwargs)
-    content = response.choices[0].message.content or ""
+    response = await asyncio.wait_for(
+        client.chat.completions.create(**request_kwargs),
+        timeout=6.0,
+    )
+    choice = response.choices[0]
+    content = choice.message.content or ""
 
     start = content.find("{")
     end = content.rfind("}") + 1
     if start == -1 or end == 0:
-        raise ValueError(f"No JSON object in Stage-4 response: {content!r}")
+        raise ValueError(
+            f"No JSON object in Stage-4 response: {content!r} "
+            f"[{_describe_choice(choice)}]"
+        )
     data = json.loads(content[start:end])
 
     # Explicit failure on a missing key — never let an absent verdict decay

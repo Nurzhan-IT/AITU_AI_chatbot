@@ -6,6 +6,7 @@ the classifier runs in read-only mode — the result is logged but does not
 yet change handler behavior (see bot/handlers/user.py).
 """
 
+import asyncio
 import hashlib
 import json
 import logging
@@ -80,6 +81,45 @@ _CLASSIFY_JSON_SCHEMA = {
 }
 
 
+def _describe_choice(choice) -> str:
+    """Diagnostic summary of an LLM completion choice.
+
+    Used when ``message.content`` is empty so we can tell *why* — was the
+    response truncated (``finish_reason='length'``), returned via tool calls,
+    refused, or did the model put the answer in a non-content field like
+    ``reasoning`` (OpenRouter reasoning models)?
+    """
+    parts: list[str] = []
+    finish = getattr(choice, "finish_reason", None)
+    if finish is not None:
+        parts.append(f"finish_reason={finish!r}")
+
+    msg = getattr(choice, "message", None)
+    if msg is None:
+        return " | ".join(parts) if parts else "no message in choice"
+
+    dump = None
+    for attr in ("model_dump", "to_dict", "dict"):
+        fn = getattr(msg, attr, None)
+        if callable(fn):
+            try:
+                dump = fn()
+                break
+            except Exception:
+                continue
+
+    if isinstance(dump, dict):
+        # Drop content (already in the surrounding error) and empty fields.
+        filtered = {k: v for k, v in dump.items() if k != "content" and v}
+        if filtered:
+            s = repr(filtered)
+            if len(s) > 500:
+                s = s[:500] + "...<truncated>"
+            parts.append(f"message={s}")
+
+    return " | ".join(parts) if parts else "no diagnostic fields"
+
+
 async def classify_intent(question: str) -> ClassificationResult:
     key = _cache_key(question)
     cached = _cache_get(key)
@@ -96,20 +136,27 @@ async def classify_intent(question: str) -> ClassificationResult:
                 {"role": "user", "content": question},
             ],
             "temperature": 0,
-            "max_tokens": 50,
+            "max_tokens": 300,
         }
         if supports_json_schema():
             request_kwargs["response_format"] = {
                 "type": "json_schema",
                 "json_schema": _CLASSIFY_JSON_SCHEMA,
             }
-        response = await client.chat.completions.create(**request_kwargs)
-        content = response.choices[0].message.content or ""
+        response = await asyncio.wait_for(
+            client.chat.completions.create(**request_kwargs),
+            timeout=6.0,
+        )
+        choice = response.choices[0]
+        content = choice.message.content or ""
 
         start = content.find("{")
         end = content.rfind("}") + 1
         if start == -1 or end == 0:
-            raise ValueError(f"No JSON object in classifier response: {content!r}")
+            raise ValueError(
+                f"No JSON object in classifier response: {content!r} "
+                f"[{_describe_choice(choice)}]"
+            )
 
         data = json.loads(content[start:end])
         if "needs_clarification" not in data:

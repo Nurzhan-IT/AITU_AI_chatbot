@@ -6,6 +6,7 @@ drive a 1–3 round Q&A before falling through to RAG search. Question
 generation is currently a stub — a real LLM call is wired in at Part B.
 """
 
+import html
 import logging
 
 from aiogram import F, Router
@@ -104,6 +105,41 @@ _STOP_WORDS = {"не знаю", "неважно", "не важно", "idk", "wha
 _OPTION_LABEL_LIMIT = 50
 
 
+def _question_with_answer(question: str, answer_label: str) -> str:
+    """Render the clarifying question with the user's chosen answer appended in bold (HTML)."""
+    return f"{html.escape(question)} Ответ: <b>{html.escape(answer_label)}</b>"
+
+
+async def _commit_answer_to_question(
+    bot,
+    chat_id: int | None,
+    message_id: int | None,
+    question: str,
+    answer_label: str,
+) -> None:
+    """Edit the original clarifying-question message: append the answer in bold and drop the keyboard.
+
+    Falls back to removing only the keyboard if the text edit fails (message too old,
+    no longer editable, etc.). Silently no-ops when chat_id/message_id are missing.
+    """
+    if not (question and chat_id and message_id):
+        return
+    try:
+        await bot.edit_message_text(
+            chat_id=chat_id,
+            message_id=message_id,
+            text=_question_with_answer(question, answer_label),
+            parse_mode="HTML",
+        )
+    except Exception:
+        try:
+            await bot.edit_message_reply_markup(
+                chat_id=chat_id, message_id=message_id, reply_markup=None,
+            )
+        except Exception:
+            pass
+
+
 async def _generate_question(state_data: dict) -> dict:
     """LLM-driven next clarifying question, grounded in the top-15 probe hits.
 
@@ -179,9 +215,14 @@ async def start_clarification_dialog(
         await _proceed_to_search(message, state)
         return
 
-    await state.update_data(last_question=q["question"], last_options=q["options"])
     kb = clarify_keyboard(0, q["options"]) if q["options"] else None
-    await message.answer(q["question"], reply_markup=kb)
+    sent = await message.answer(q["question"], reply_markup=kb)
+    await state.update_data(
+        last_question=q["question"],
+        last_options=q["options"],
+        last_question_msg_id=sent.message_id,
+        last_question_chat_id=sent.chat.id,
+    )
 
 
 async def _ask_next(message: Message, state: FSMContext) -> None:
@@ -221,12 +262,14 @@ async def _ask_next(message: Message, state: FSMContext) -> None:
         await _proceed_to_search(message, state)
         return
 
+    kb = clarify_keyboard(rounds, q["options"]) if q["options"] else None
+    sent = await message.answer(q["question"], reply_markup=kb)
     await state.update_data(
         last_question=q["question"],
         last_options=q["options"],
+        last_question_msg_id=sent.message_id,
+        last_question_chat_id=sent.chat.id,
     )
-    kb = clarify_keyboard(rounds, q["options"]) if q["options"] else None
-    await message.answer(q["question"], reply_markup=kb)
 
 
 def _profile_is_strong(profile: dict) -> bool:
@@ -428,14 +471,9 @@ async def cb_clarify(callback: CallbackQuery, state: FSMContext) -> None:
         await callback.answer("Этот вопрос уже отвечен.")
         return
 
-    # Remove the keyboard immediately so subsequent clicks have no effect.
-    try:
-        await callback.message.edit_reply_markup(reply_markup=None)
-    except Exception:
-        pass
-
     if choice == "skip":
         answers.append({"question": last_question, "answer": None, "skipped": True})
+        answer_label = "Пропущено"
     else:
         try:
             idx = int(choice)
@@ -443,6 +481,15 @@ async def cb_clarify(callback: CallbackQuery, state: FSMContext) -> None:
         except (ValueError, TypeError):
             text_value = ""
         answers.append({"question": last_question, "answer": text_value})
+        answer_label = text_value or "—"
+
+    await _commit_answer_to_question(
+        callback.bot,
+        callback.message.chat.id if callback.message else None,
+        callback.message.message_id if callback.message else None,
+        last_question,
+        answer_label,
+    )
 
     await state.update_data(answers=answers, rounds_done=rounds_done + 1)
     await callback.answer()
@@ -454,19 +501,42 @@ async def cb_clarify(callback: CallbackQuery, state: FSMContext) -> None:
 
 @router.message(Command("skip"), ClarifyDialog.waiting_for_answer)
 async def cmd_skip(message: Message, state: FSMContext) -> None:
+    data = await state.get_data()
+    await _commit_answer_to_question(
+        message.bot,
+        data.get("last_question_chat_id"),
+        data.get("last_question_msg_id"),
+        data.get("last_question", ""),
+        "Пропущено",
+    )
     await _proceed_to_search(message, state)
 
 
 @router.message(F.text, ClarifyDialog.waiting_for_answer)
 async def on_clarify_text(message: Message, state: FSMContext) -> None:
     raw = (message.text or "").strip()
-    if raw.lower() in _STOP_WORDS:
+    data = await state.get_data()
+    last_question = data.get("last_question", "")
+
+    is_stop = raw.lower() in _STOP_WORDS
+    if is_stop or not raw:
+        answer_label = "Пропущено"
+    else:
+        answer_label = raw
+
+    await _commit_answer_to_question(
+        message.bot,
+        data.get("last_question_chat_id"),
+        data.get("last_question_msg_id"),
+        last_question,
+        answer_label,
+    )
+
+    if is_stop or not raw:
         await _proceed_to_search(message, state)
         return
 
-    data = await state.get_data()
     answers = list(data.get("answers", []))
-    last_question = data.get("last_question", "")
     answers.append({"question": last_question, "answer": raw})
     await state.update_data(
         answers=answers,
