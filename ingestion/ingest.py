@@ -12,12 +12,14 @@ from urllib.parse import quote
 import pymupdf4llm
 import fitz                  # PyMuPDF raw text extraction for accurate page offsets
 import tiktoken
+from ingestion.chunk_metadata import extract_chunk_metadata_batch
 from ingestion.page_classifier import classify_document, PageType
 from ingestion.page_processor import process_page
 from ingestion.post_processor import postprocess
 from qdrant_client import AsyncQdrantClient
 from qdrant_client.models import (
     Distance,
+    PayloadSchemaType,
     PointStruct,
     SparseIndexParams,
     SparseVector,
@@ -352,6 +354,24 @@ async def _ensure_collection(client: AsyncQdrantClient) -> None:
             settings.qdrant_collection, settings.hybrid_search_enabled,
         )
 
+    # Payload indices for profile-aware filtering (§2.1). Both fields are
+    # populated by ingestion.chunk_metadata, and the retriever uses them with
+    # Filter(must=[FieldCondition(...)]) to hard-filter by user profile.
+    # Calls are idempotent in practice but wrapped defensively so an existing
+    # index never aborts ingestion.
+    for field_name in ("applies_to", "admission_type"):
+        try:
+            await client.create_payload_index(
+                collection_name=settings.qdrant_collection,
+                field_name=field_name,
+                field_schema=PayloadSchemaType.KEYWORD,
+            )
+        except Exception:
+            logger.debug(
+                "create_payload_index('%s') skipped (likely already exists)",
+                field_name, exc_info=True,
+            )
+
 
 # ---------------------------------------------------------------------------
 # Full pipeline
@@ -440,6 +460,30 @@ async def ingest_pdf(
 
     logger.info("Embedding %d chunks...", len(chunks))
     vectors = await embedder.embed_passages(clean_texts)
+
+    # Per-chunk LLM metadata (§2.1). Gated by settings.enable_chunk_metadata so
+    # debug runs can skip the LLM cost. extract_chunk_metadata_batch is
+    # fail-open: on any error it returns {"applies_to": [], "admission_type": [],
+    # "topic_tags": []} for the affected chunk and logs a warning.
+    if settings.enable_chunk_metadata:
+        await _notify(progress_cb, "🏷️ Классифицирую чанки (метаданные)...")
+        metadata_list = await extract_chunk_metadata_batch(
+            clean_texts, batch_size=settings.chunk_metadata_batch_size,
+        )
+        if len(metadata_list) != len(points):
+            logger.warning(
+                "chunk_metadata length mismatch: got %d, expected %d — padding with empty",
+                len(metadata_list), len(points),
+            )
+            empty = {"applies_to": [], "admission_type": [], "topic_tags": []}
+            metadata_list = (metadata_list + [empty] * len(points))[:len(points)]
+        for point, meta in zip(points, metadata_list):
+            point.payload["applies_to"] = meta.get("applies_to", [])
+            point.payload["admission_type"] = meta.get("admission_type", [])
+            point.payload["topic_tags"] = meta.get("topic_tags", [])
+    else:
+        logger.info("enable_chunk_metadata=False — skipping LLM metadata extraction")
+
     await _notify(progress_cb, "💾 Сохраняю в базу...")
 
     if settings.hybrid_search_enabled:

@@ -22,7 +22,11 @@ from aiogram.types import (
 from bot.handlers.dialog_states import ClarifyDialog
 from config import settings
 from rag.dialog.enricher import enrich_and_profile
-from rag.dialog.question_gen import next_clarification, _get_cached_docs
+from rag.dialog.question_gen import (
+    _compute_filled_slots,
+    _get_cached_docs,
+    next_clarification,
+)
 from rag.dialog.reranker import rerank_chunks
 from rag.dialog.summary_store import get_summaries_for_docs
 
@@ -51,17 +55,50 @@ def _extract_doc_list(hits: list[dict]) -> list[dict]:
 _FILTER_USER_TYPE_KEYWORDS: dict[str, str] = {
     "бакалавр":   "бакалавр",
     "магистрант": "магистр",
+    "докторант":  "докторант",
     "сотрудник":  "сотрудник",
 }
+
+
+# Profile keys that, when populated, count as the corresponding slot being filled.
+# Mirrors the slot ids returned by the classifier (see CLASSIFY_SYSTEM_PROMPT).
+_PROFILE_KEY_TO_SLOT: dict[str, str] = {
+    "user_type":        "level",
+    "admission_type":   "admission_type",
+    "topics":           "topic",
+    "document_hints":   "document",
+    "temporal_context": "year",
+}
+
+
+def _filled_slots_from_profile(profile: dict) -> set[str]:
+    filled: set[str] = set()
+    for key, slot in _PROFILE_KEY_TO_SLOT.items():
+        value = profile.get(key)
+        if value is None:
+            continue
+        if isinstance(value, (list, tuple, set)) and not value:
+            continue
+        if isinstance(value, str) and not value.strip():
+            continue
+        filled.add(slot)
+    return filled
 
 
 def _filter_chunks_by_profile(chunks: list[dict], profile: dict) -> list[dict]:
     """Return the subset of probe chunks consistent with the user's clarification profile.
 
-    OR-based across criteria — a chunk is kept when ANY signal matches.
-    When no profile signals are present the full list is returned unchanged.
+    admission_type acts as a HARD filter — chunks whose ``admission_type`` list
+    is non-empty and excludes both the user's cohort and the wildcard ``"all"``
+    are dropped even if they look topically relevant. Empty or missing
+    ``admission_type`` on the chunk is treated as NEUTRAL (kept), so legacy
+    chunks ingested before metadata extraction was wired in still pass through.
 
-    Priority order checked per chunk:
+    The remaining criteria are OR-based — a chunk is kept when ANY signal
+    matches. When no profile signals are present the full list is returned
+    unchanged.
+
+    Priority order checked per chunk (after admission_type hard-filter):
       1. document_hints  → partial match in chunk doc_title
       2. topics          → partial match in doc_title or section_title
       3. user_type stem  → partial match in chunk text body
@@ -77,12 +114,22 @@ def _filter_chunks_by_profile(chunks: list[dict], profile: dict) -> list[dict]:
     user_stem = _FILTER_USER_TYPE_KEYWORDS.get(
         str(profile.get("user_type") or "").lower(), ""
     ).lower()
+    profile_at = str(profile.get("admission_type") or "").strip().lower() or None
 
-    if not doc_hints and not topics and not user_stem:
+    if not doc_hints and not topics and not user_stem and not profile_at:
         return list(chunks)
+
+    has_or_signals = bool(doc_hints or topics or user_stem)
 
     result: list[dict] = []
     for chunk in chunks:
+        if profile_at:
+            chunk_at = chunk.get("admission_type") or []
+            if isinstance(chunk_at, list) and chunk_at:
+                chunk_at_lower = {str(x).lower() for x in chunk_at}
+                if profile_at not in chunk_at_lower and "all" not in chunk_at_lower:
+                    continue
+
         doc_title     = (chunk.get("doc_title")     or "").lower()
         section_title = (chunk.get("section_title") or "").lower()
         text          = (chunk.get("text")          or "").lower()
@@ -96,6 +143,11 @@ def _filter_chunks_by_profile(chunks: list[dict], profile: dict) -> list[dict]:
         if user_stem and user_stem in text:
             result.append(chunk)
             continue
+
+        # No OR-signals configured — admission_type alone is gating; surviving
+        # the hard-filter is sufficient to keep the chunk.
+        if not has_or_signals:
+            result.append(chunk)
 
     return result
 
@@ -174,6 +226,7 @@ async def start_clarification_dialog(
     state: FSMContext,
     classification_reason: str | None = None,
     probe_hits: list[dict] | None = None,
+    required_slots: list[str] | None = None,
 ) -> None:
     if not probe_hits:
         from bot.handlers.user import _retriever
@@ -190,6 +243,8 @@ async def start_clarification_dialog(
     unique_titles = list({h.get("doc_title", "") for h in probe_hits if h.get("doc_title")})
     doc_summaries = await get_summaries_for_docs(unique_titles)
 
+    required_slots = list(required_slots or [])
+
     await state.set_state(ClarifyDialog.waiting_for_answer)
     await state.update_data(
         original_query=original_query,
@@ -198,6 +253,7 @@ async def start_clarification_dialog(
         last_question="",
         last_options=[],
         classification_reason=classification_reason,
+        required_slots=required_slots,
         probe_top15=probe_top15,
         probe_chunks=probe_hits,  # full chunk data reused in _proceed_to_search (D2)
         doc_summaries=doc_summaries,
@@ -207,6 +263,7 @@ async def start_clarification_dialog(
         "original_query": original_query,
         "rounds_done": 0,
         "answers": [],
+        "required_slots": required_slots,
         "probe_top15": probe_top15,
         "doc_summaries": doc_summaries,
     })
@@ -228,20 +285,34 @@ async def start_clarification_dialog(
 async def _ask_next(message: Message, state: FSMContext) -> None:
     data = await state.get_data()
     rounds = data.get("rounds_done", 0)
+    required_slots = list(data.get("required_slots") or [])
 
     if rounds >= _MAX_ROUNDS:
         await _proceed_to_search(message, state)
         return
 
-    # Early exit: profile built from answers so far is already strong — no point
-    # asking more questions.  We call enrich_and_profile once here and cache the
-    # result in FSM state so _proceed_to_search can reuse it without a second call.
+    # Cheap early exit: explicit keyword detection covers most cases (level +
+    # admission_type) without calling the enricher LLM. When every required
+    # slot is already pinned in the query/answers, skip straight to search.
     answers = data.get("answers", [])
+    original_query = data.get("original_query", "")
+    if required_slots:
+        filled_keyword_slots = _compute_filled_slots(original_query, answers)
+        if all(slot in filled_keyword_slots for slot in required_slots):
+            logger.debug(
+                "_ask_next keyword early exit: required_slots=%s filled=%s",
+                required_slots, filled_keyword_slots,
+            )
+            await _proceed_to_search(message, state)
+            return
+
+    # Expensive early exit: enrich_and_profile builds the structured profile and
+    # we check whether all required slots are filled. The result is cached in
+    # FSM state so _proceed_to_search can reuse it without a second LLM call.
     if answers:
-        original_query = data.get("original_query", "")
         try:
             enriched, profile = await enrich_and_profile(original_query, answers)
-            if _profile_is_strong(profile):
+            if _profile_is_strong(profile, required_slots):
                 logger.debug(
                     "_ask_next early exit: strong profile after %d round(s) — %s",
                     rounds, profile,
@@ -272,18 +343,19 @@ async def _ask_next(message: Message, state: FSMContext) -> None:
     )
 
 
-def _profile_is_strong(profile: dict) -> bool:
-    """Return True when the profile warrants the expensive search_with_profile + rerank path.
+def _profile_is_strong(profile: dict, required_slots: list[str]) -> bool:
+    """Return True when every required slot the classifier asked for is filled.
 
-    Strong if a high-signal slot is filled (user_type or document_hints), or if two
-    or more slots are non-empty. A single weak slot (e.g. one topics keyword) falls
-    through to the cheap _retriever.search path.
+    The classifier (CLASSIFY v2) emits a ``required_slots`` list per query. A
+    profile is "strong" — meriting the expensive ``search_with_profile`` +
+    rerank path — only when ALL of those slots have a value in the profile.
+
+    When ``required_slots`` is empty (e.g. the classifier said "specific" but
+    we still ran clarification), no slots are demanded → treat as strong and
+    let the expensive path handle whatever signal the profile has.
     """
-    strong = bool(profile.get("user_type") or profile.get("document_hints"))
-    if strong:
-        return True
-    filled = sum(1 for key in ("topics", "temporal_context") if profile.get(key))
-    return filled >= 2
+    filled = _filled_slots_from_profile(profile)
+    return all(slot in filled for slot in required_slots)
 
 
 async def _proceed_to_search(message: Message, state: FSMContext) -> None:
@@ -306,6 +378,7 @@ async def _proceed_to_search(message: Message, state: FSMContext) -> None:
     answers = data.get("answers", [])
     rounds = data.get("rounds_done", 0)
     classification_reason = data.get("classification_reason")
+    required_slots = list(data.get("required_slots") or [])
     probe_chunks: list[dict] = data.get("probe_chunks") or []
     await state.clear()
 
@@ -374,10 +447,12 @@ async def _proceed_to_search(message: Message, state: FSMContext) -> None:
     # --- Fallback: enriched-query search (original logic) ------------------
     if chunks is None:
         try:
-            if _profile_is_strong(profile):
+            if _profile_is_strong(profile, required_slots):
                 # Pull a wider candidate pool (10) for the LLM reranker to choose from.
                 chunks = await _retriever.search_with_profile(enriched, profile, k=10)
-                chunks = await rerank_chunks(original_query, chunks, k=settings.top_k)
+                chunks = await rerank_chunks(
+                    original_query, chunks, k=settings.top_k, profile=profile,
+                )
             else:
                 chunks = await _retriever.search(enriched)
         except Exception as e:
@@ -389,7 +464,7 @@ async def _proceed_to_search(message: Message, state: FSMContext) -> None:
         logger.debug("Top chunk factor scores: %s", chunks[0].get("factor_scores"))
 
     try:
-        result = await _generator.generate(original_query, chunks)
+        result = await _generator.generate(original_query, chunks, profile=profile)
     except Exception as e:
         logger.error("Generation failed after clarification for user %s: %s", user_id, e)
         await status_msg.edit_text("😔 Не удалось сформировать ответ. Попробуйте позже.")

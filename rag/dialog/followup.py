@@ -14,7 +14,12 @@ from time import time
 from typing import Optional
 
 from config import settings
-from rag.dialog.enricher import UserProfile, _ALLOWED_USER_TYPES, _empty_profile
+from rag.dialog.enricher import (
+    _ALLOWED_ADMISSION_TYPES,
+    _ALLOWED_USER_TYPES,
+    UserProfile,
+    _empty_profile,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -65,6 +70,12 @@ def _apply_patch(base: dict, patch: dict) -> UserProfile:
         ut = str(patch["user_type"] or "").strip().lower()
         merged["user_type"] = ut if ut in _ALLOWED_USER_TYPES else base.get("user_type")
 
+    if "admission_type" in patch:
+        at = str(patch["admission_type"] or "").strip().lower()
+        merged["admission_type"] = (
+            at if at in _ALLOWED_ADMISSION_TYPES else base.get("admission_type")
+        )
+
     if "topics" in patch and isinstance(patch["topics"], list):
         existing: list[str] = list(base.get("topics") or [])
         for t in patch["topics"]:
@@ -85,6 +96,7 @@ def _apply_patch(base: dict, patch: dict) -> UserProfile:
     return UserProfile(
         topics=merged.get("topics") or [],
         user_type=merged.get("user_type"),
+        admission_type=merged.get("admission_type"),
         document_hints=merged.get("document_hints") or [],
         temporal_context=merged.get("temporal_context"),
     )

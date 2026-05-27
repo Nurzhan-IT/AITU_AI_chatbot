@@ -12,6 +12,7 @@ in the original top-k order being returned unchanged.
 
 import json
 import logging
+from typing import Optional
 
 from config import settings
 from rag.dialog.prompts import RERANK_SYSTEM_PROMPT
@@ -21,18 +22,60 @@ logger = logging.getLogger(__name__)
 
 _TEXT_EXCERPT_LEN = 300
 
+_EMPTY_PROFILE_FOR_PROMPT = {
+    "user_type": None,
+    "admission_type": None,
+    "document_hints": [],
+    "temporal_context": None,
+}
 
-def _build_user_content(query: str, chunks: list[dict]) -> str:
-    lines: list[str] = [f"User question: {query}", "", "Candidates:"]
+
+def _profile_payload(profile: Optional[dict]) -> dict:
+    if not profile:
+        return dict(_EMPTY_PROFILE_FOR_PROMPT)
+    return {
+        "user_type": profile.get("user_type"),
+        "admission_type": profile.get("admission_type"),
+        "document_hints": list(profile.get("document_hints") or []),
+        "temporal_context": profile.get("temporal_context"),
+    }
+
+
+def _coerce_str_list(raw) -> list[str]:
+    if isinstance(raw, list):
+        return [str(x) for x in raw if x is not None and str(x).strip()]
+    if raw is None:
+        return []
+    s = str(raw).strip()
+    return [s] if s else []
+
+
+def _build_user_content(
+    query: str, chunks: list[dict], profile: Optional[dict]
+) -> str:
+    lines: list[str] = [
+        f"QUESTION: {query}",
+        "",
+        "PROFILE:",
+        json.dumps(_profile_payload(profile), ensure_ascii=False),
+        "",
+        "CANDIDATES:",
+    ]
     for i, c in enumerate(chunks):
         title = (c.get("doc_title") or "(untitled)").strip()
         section = (c.get("section_title") or "").strip()
         text = (c.get("text") or "").replace("\n", " ").strip()
         excerpt = text[:_TEXT_EXCERPT_LEN]
+        applies_to = _coerce_str_list(c.get("applies_to"))
+        admission_type = _coerce_str_list(c.get("admission_type"))
         header = f"[{i}] {title}"
         if section:
             header += f" — {section}"
         lines.append(header)
+        lines.append(
+            "applies_to=" + json.dumps(applies_to, ensure_ascii=False)
+            + " admission_type=" + json.dumps(admission_type, ensure_ascii=False)
+        )
         lines.append(excerpt)
         lines.append("")
     return "\n".join(lines)
@@ -56,7 +99,12 @@ def _parse_order(raw, n: int) -> list[int]:
     return cleaned
 
 
-async def rerank_chunks(query: str, chunks: list[dict], k: int = 5) -> list[dict]:
+async def rerank_chunks(
+    query: str,
+    chunks: list[dict],
+    k: int = 5,
+    profile: Optional[dict] = None,
+) -> list[dict]:
     if len(chunks) <= k:
         return chunks
 
@@ -66,7 +114,10 @@ async def rerank_chunks(query: str, chunks: list[dict], k: int = 5) -> list[dict
             model=settings.llm_model,
             messages=[
                 {"role": "system", "content": RERANK_SYSTEM_PROMPT},
-                {"role": "user", "content": _build_user_content(query, chunks)},
+                {
+                    "role": "user",
+                    "content": _build_user_content(query, chunks, profile),
+                },
             ],
             temperature=0,
             max_tokens=700,

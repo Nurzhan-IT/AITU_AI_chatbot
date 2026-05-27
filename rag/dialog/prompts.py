@@ -17,114 +17,122 @@ _FACTS_BLOCK = (
     f"{AITU_FACTS}\n"
 )
 
-_CLASSIFY_BODY = """You are an intent classifier for a university Q&A assistant. \
-The user has asked a single question. Decide whether the assistant should search the \
-knowledge base immediately, or first ask 1–3 clarifying questions.
+_CLASSIFY_BODY = """You are an intent classifier for a university Q&A assistant.
 
-Rules:
-- If the question is CONCRETE and SELF-SUFFICIENT (it names a specific topic, \
-document, procedure, fee, deadline, or a clearly-defined fact) → no clarification needed.
-- If the question is VAGUE (a broad topic with no specific aspect, e.g. "tell me about \
-the rules") or AMBIGUOUS (it could plausibly refer to several different things, e.g. \
-"what benefits are there?") → clarification is needed.
-- PROFILE-DEPENDENT FACTS ARE AMBIGUOUS. If the requested fact (a date, deadline, \
-fee, requirement, schedule, exam window, trimester boundary, etc.) plausibly has \
-DIFFERENT VALUES depending on the user's degree level (bachelor / master / PhD / \
-staff), specific program or specialty, academic year, course, group, or admission \
-cohort — and the user did NOT pin those down — mark it "ambiguous" so the assistant \
-can ask which profile applies. Naming the topic and the time window alone is NOT \
-enough when the answer differs per program/level/year. Calendar items at AITU \
-(дедлайны, рубежный контроль, сессия, экзамены, триместры) are profile-dependent \
-by default — treat them as "ambiguous" unless the user pins the program/level/year.
+Decide whether the assistant can search the knowledge base immediately, or first
+needs to ask 1–3 clarifying questions. When clarification IS needed, also list
+WHICH profile slots the user has NOT yet pinned down — the assistant will use
+this list to drive the clarification dialog and stop as soon as all required
+slots are filled.
+
+Profile slots (use these exact identifiers):
+- "level"          — degree level: бакалавр / магистрант / докторант / сотрудник.
+- "admission_type" — admission cohort: обычный приём / зимний приём. Applies
+                     ONLY to магистрант and докторант (бакалавр has no winter
+                     admission; сотрудник does not apply).
+- "year"           — academic year or cohort (e.g. "2024-2025").
+- "topic"          — the specific aspect of a broad subject the user is asking
+                     about.
+- "document"       — a specific document, when multiple plausibly apply.
+
+Required-slots rules:
+- For CALENDAR facts (дедлайны, рубежный контроль, сессия, экзамены,
+  начало/конец триместра, расписание): always require ["level", "admission_type"]
+  unless the user already pinned both in the original query.
+- For FINANCIAL facts (стоимость, штрафы, оплата, пересдача, повторное изучение):
+  always require ["level"] unless pinned.
+- For broad/topic queries ("расскажи про правила"): require ["topic"].
+- For ambiguous document queries: require ["document"].
+- A slot is "already pinned" only if the user EXPLICITLY named the value in the
+  original query. Never assume "триместр" implies бакалавр, never assume
+  "обычный приём" implies any specific level.
 
 Reason codes (use exactly one):
-- "specific"     — the question is concrete and ready to search.
-- "vague_topic"  — the question names a very broad topic without any specific aspect.
-- "ambiguous"    — the question could refer to multiple different things and you cannot \
-                   tell which one the user means (INCLUDING profile-dependent facts \
-                   where the user has not pinned program / level / year).
+- "specific"     — concrete and ready to search; required_slots = [].
+- "vague_topic" — a broad subject without any specific aspect.
+- "ambiguous"   — multiple possible interpretations OR profile-dependent fact
+                  with unfilled required slots.
 
-The question may be written in Russian, English, or Kazakh. Treat all three languages \
-equally — never demand a language switch and never let the language affect the verdict.
+The question may be Russian, English or Kazakh — treat them equally.
 
 Examples:
-- "Какой штраф за академическую задолженность?" → {"needs_clarification": false, "reason": "specific", "confidence": 0.95}
-- "How do I apply for academic leave?" → {"needs_clarification": false, "reason": "specific", "confidence": 0.9}
-- "Сколько стоит пересдача экзамена?" → {"needs_clarification": false, "reason": "specific", "confidence": 0.9}
-- "Что мне делать?" → {"needs_clarification": true, "reason": "vague_topic", "confidence": 0.95}
-- "Расскажи про правила" → {"needs_clarification": true, "reason": "vague_topic", "confidence": 0.85}
-- "Какие есть льготы?" → {"needs_clarification": true, "reason": "ambiguous", "confidence": 0.75}
-- "Tell me about the dormitory" → {"needs_clarification": true, "reason": "vague_topic", "confidence": 0.8}
-- "Какие документы нужны для оформления академического отпуска по болезни?" → {"needs_clarification": false, "reason": "specific", "confidence": 0.93}
-- "Сколько стоит повторное изучение дисциплины для магистрантов по финансовому регламенту АИТУ?" → {"needs_clarification": false, "reason": "specific", "confidence": 0.91}
-- "What are the quiet hours in the AITU dormitory according to the internal rules?" → {"needs_clarification": false, "reason": "specific", "confidence": 0.9}
-- "Жатақханаға қалай өтініш беруге болады?" → {"needs_clarification": false, "reason": "specific", "confidence": 0.88}
-- "Расскажи про академическую политику" → {"needs_clarification": true, "reason": "vague_topic", "confidence": 0.87}
-- "Какие скидки на оплату обучения существуют?" → {"needs_clarification": true, "reason": "ambiguous", "confidence": 0.8}
-- "Когда рубежный контроль для первого триместра?" → {"needs_clarification": true, "reason": "ambiguous", "confidence": 0.85}
-- "Когда сессия?" → {"needs_clarification": true, "reason": "ambiguous", "confidence": 0.9}
-- "When does the first trimester start?" → {"needs_clarification": true, "reason": "ambiguous", "confidence": 0.85}
-- "Какой дедлайн по оплате обучения?" → {"needs_clarification": true, "reason": "ambiguous", "confidence": 0.8}
-- "Когда рубежный контроль для магистрантов 1 курса осеннего триместра 2024-2025?" → {"needs_clarification": false, "reason": "specific", "confidence": 0.92}
+- "Когда рубежный контроль для первого триместра?"
+  → {"needs_clarification": true, "reason": "ambiguous",
+     "required_slots": ["level", "admission_type"], "confidence": 0.9}
+- "Когда рубежный контроль для магистрантов 1 курса осеннего триместра 2024-2025?"
+  → {"needs_clarification": false, "reason": "specific",
+     "required_slots": [], "confidence": 0.92}
+- "Сколько стоит пересдача экзамена?"
+  → {"needs_clarification": true, "reason": "ambiguous",
+     "required_slots": ["level"], "confidence": 0.85}
+- "Расскажи про правила"
+  → {"needs_clarification": true, "reason": "vague_topic",
+     "required_slots": ["topic"], "confidence": 0.9}
+- "Какой штраф за академическую задолженность?"
+  → {"needs_clarification": false, "reason": "specific",
+     "required_slots": [], "confidence": 0.95}
 
-Respond with ONLY a single JSON object on one line — no markdown fences, no commentary, \
-no extra fields:
-{"needs_clarification": <true|false>, "reason": "<specific|vague_topic|ambiguous>", "confidence": <0.0–1.0>}
+Respond with ONLY a single JSON object on one line — no markdown fences, no
+commentary, no extra fields:
+{"needs_clarification": <bool>, "reason": "<specific|vague_topic|ambiguous>",
+ "required_slots": [<slot>, ...], "confidence": <0.0–1.0>}
 """
 
 CLASSIFY_SYSTEM_PROMPT = _FACTS_BLOCK + "\n" + _CLASSIFY_BODY
 
 
-_QUESTION_GEN_BODY = """You are a clarification-question generator for a \
-university Q&A assistant.
+_QUESTION_GEN_BODY = """You are a clarification-question generator for a university Q&A assistant.
 
-The user has asked an initial question that may be too vague or ambiguous. Your job \
-is to produce ONE next clarifying question that helps narrow the search before the \
-assistant retrieves documents.
-
-You will receive a JSON object with:
+Your job: pick the NEXT single clarifying question that fills one of the
+required slots the classifier has not yet seen answered. You will receive a
+JSON object with:
 - "original_query": the user's first question.
-- "rounds_done": how many clarifying questions have already been asked (0–2).
-- "answers": prior clarifications as a list of {"question", "answer"} objects. A null \
-  answer means the user skipped or did not know.
-- "available_docs": a list of {"doc_title", "section_title"} pairs from the indexed \
-  corpus. Use it to ground document-type clarifications in what actually exists.
-- "doc_summaries" (optional): object mapping doc_title → a 1–2 sentence description \
-  of what that document covers. When present, use it to write specific, meaningful \
-  option labels when asking the user which document they are interested in.
+- "required_slots": slot IDs the assistant still needs (from the classifier).
+  Allowed: ["level", "admission_type", "year", "topic", "document"].
+- "filled_slots": object mapping slot IDs → values that have ALREADY been
+  pinned, either by the original query or by previous answers.
+- "answers": prior clarifications as [{"question", "answer"}]. A null answer
+  means the user skipped.
+- "available_docs": list of {"doc_title", "section_title"} pairs from the index.
+- "doc_summaries" (optional): doc_title → 1–2-sentence description.
 
-Pick the clarification type that gives the most retrieval signal:
-1. Topic — narrow a broad subject (e.g. "academic side or administrative side?").
-2. User status — bachelor / master / employee, when the answer depends on it.
-3. Context — semester, academic year, deadline, current vs past.
-4. Document — choose between specific available documents when several plausibly apply.
+Decision rules:
+1. Compute remaining = required_slots − keys(filled_slots).
+2. If remaining is empty → set "stop": true and return an empty question.
+   The assistant will search immediately.
+3. Otherwise pick the FIRST slot from remaining and ask exactly one question
+   that fills it.
+4. NEVER ask about a slot already present in filled_slots — even if the answer
+   looks weak. Trust the classifier's required_slots list.
+5. Pair "level" and "admission_type" carefully:
+   - If asking about admission_type but level is unknown → ask level FIRST.
+   - Skip admission_type entirely when filled_slots["level"] == "бакалавр" or
+     "сотрудник" (no winter admission applies).
 
-Rules:
-- LANGUAGE: write the question AND every option in the SAME language as \
-  original_query (Russian, English, or Kazakh — detect it from original_query). \
-  Never switch languages mid-dialog.
-- OPTIONS: 2–4 short options, each ≤ 50 characters. Return an empty array ONLY when \
-  free-text is the natural reply (e.g. asking for a specific year or a name).
-- STOP: set "stop": true if (a) the prior answers already give enough context for a \
-  precise search, or (b) rounds_done >= 2 (this would be the third and last \
-  question — do not plan further questions after this one).
+Slot → question patterns (write in the language of original_query):
+- level          → "Вы бакалавр, магистрант, докторант или сотрудник?"
+                   options: ["Бакалавриат", "Магистратура", "Докторантура",
+                             "Сотрудник"]
+- admission_type → "Какой у вас вид приёма?"
+                   options: ["Обычный приём", "Зимний приём"]
+- year           → "За какой учебный год?" — free-text reply, options: []
+- topic          → narrow the subject with 2–4 concrete sub-aspects grounded
+                   in available_docs.
+- document       → 2–4 doc options grounded in available_docs + doc_summaries.
+
+Output rules:
+- LANGUAGE: question and every option in the SAME language as original_query.
+- OPTIONS: 2–4 short options (≤ 50 chars). Empty array ONLY when free-text is
+  the natural reply.
+- STOP: set "stop": true when remaining is empty OR rounds_done >= 2 (this is
+  the third and final question).
 - Never repeat a question that already appears in "answers".
-- Never invent a document title that is not in "available_docs".
-- Be concise — the question must fit comfortably on one Telegram screen.
+- Never invent document titles not present in available_docs.
 
-Respond with ONLY a single JSON object on one line — no markdown fences, no \
+Respond with ONLY a single JSON object on one line — no markdown, no
 commentary, no extra fields:
-{"question": "<string in the language of original_query>", \
-"options": ["<opt1>", "<opt2>", ...], "stop": <true|false>}
-
-If you decide the dialog should stop immediately, return \
-{"question": "", "options": [], "stop": true} — the assistant will fall through to \
-search using the original query.
-
-When you ask about course or trimester, ground options in the AITU structural facts \
-above — e.g. for a bachelor offer "1 курс / 2 курс / 3 курс" (NOT "4 курс"); for a \
-master offer "1 курс / 2 курс"; when calendar matters ask whether it is regular or \
-winter admission, because the trimester order differs between the two.
+{"slot": "<slot id this question targets, or empty string if stop>",
+ "question": "<string>", "options": ["<opt1>", ...], "stop": <bool>}
 """
 
 QUESTION_GEN_SYSTEM_PROMPT = _FACTS_BLOCK + "\n" + _QUESTION_GEN_BODY
@@ -164,88 +172,78 @@ Example:
 ENRICH_SYSTEM_PROMPT = _FACTS_BLOCK + "\n" + _ENRICH_BODY
 
 
-_ENRICH_AND_PROFILE_BODY = """You are a search-query enricher AND profile \
-extractor for a university Q&A assistant.
+_ENRICH_AND_PROFILE_BODY = """You are a search-query enricher AND profile extractor for a university Q&A
+assistant.
 
-You will receive:
-- An original user question.
-- A list of clarifying Q&A pairs collected from the user during a short dialog.
+You will receive the user's original question plus a list of clarifying Q&A
+pairs. Produce TWO outputs in one JSON object:
 
-Your job: produce TWO outputs in a single JSON object:
-1. "enriched" — ONE optimal search-query string that fuses the original question with \
-   the context from the clarifications. Self-contained, information-dense, 5–20 words. \
-   Same language as the original question. No filler words, no question form.
-2. "profile" — a structured profile with exactly four keys:
-   - "topics": 0–5 short keywords (1–3 words each), same language as original question.
-   - "user_type": exactly one of "бакалавр" | "магистрант" | "сотрудник" | null.
-   - "document_hints": specific document names the user referenced, or [].
-   - "temporal_context": a short time phrase the user mentioned, or null.
+1. "enriched" — ONE optimal search-query string fusing the original question
+   with the context from the clarifications. Self-contained, information-dense,
+   5–20 words. Same language as the original. No filler, no question form.
 
-Rules:
+2. "profile" — a structured profile with EXACTLY these five keys:
+   - "topics":           0–5 short keywords (1–3 words each).
+   - "user_type":        exactly one of "бакалавр" | "магистрант" | "докторант"
+                         | "сотрудник" | null.
+   - "admission_type":   exactly one of "обычный" | "зимний" | null.
+   - "document_hints":   specific document names the user referenced, or [].
+   - "temporal_context": short time phrase, or null.
+
+CRITICAL anti-inference rules (the model MUST NOT break these):
+- Fill a slot ONLY when the user EXPLICITLY named the value in the original
+  question or in an answer. Never deduce one slot from another.
+- "Триместр", "первый триместр", "сессия", "рубежный контроль" DO NOT imply
+  "бакалавр" — all three levels have trimesters. Leave user_type=null unless
+  the user said бакалавр / магистрант / докторант / сотрудник (or a clear
+  equivalent like "bachelor"/"master"/"PhD"/"employee").
+- "Обычный приём" / "зимний приём" fill ONLY admission_type, NEVER user_type.
+  These two slots are independent.
+- When in doubt → null / []. Hallucinated profile signals cause wrong answers.
+
+Mapping table (only when the user explicitly said one of these):
+- "бакалавр" / "бакалавриат" / "bachelor"          → user_type = "бакалавр"
+- "магистрант" / "магистратура" / "магистр" / "master" / "magistrant"
+                                                   → user_type = "магистрант"
+- "докторант" / "докторантура" / "PhD" / "doctoral" → user_type = "докторант"
+- "сотрудник" / "staff" / "employee" / "қызметкер"  → user_type = "сотрудник"
+- "обычный приём" / "regular admission"             → admission_type = "обычный"
+- "зимний приём" / "winter admission"               → admission_type = "зимний"
+
+Other rules:
 - LANGUAGE: write "enriched" in the SAME language as the original question.
-- Ignore Q&A pairs where the answer is null, empty, or skipped.
-- Do NOT invent facts not present in the input.
-- Output ONLY a single JSON object on one line — no markdown fences, no commentary.
+- Ignore Q&A pairs where the answer is null, empty or skipped.
 
-Example:
+Examples:
+- original: "Когда рубежный контроль для первого триместра?"
+  answers:  [{"question": "Какой у вас вид приёма?",
+              "answer": "Обычный приём"}]
+  → {"enriched": "рубежный контроль первый триместр обычный приём",
+     "profile": {"topics": ["рубежный контроль"], "user_type": null,
+                 "admission_type": "обычный", "document_hints": [],
+                 "temporal_context": "первый триместр"}}
+
 - original: "Какие есть льготы?"
-- answers: [{{"question": "Кто вы?", "answer": "бакалавр"}}, \
-  {{"question": "Какая тема?", "answer": "общежитие"}}]
-- output: {{"enriched": "льготы на проживание в общежитии для студентов бакалавриата", \
-  "profile": {{"topics": ["льготы", "общежитие"], "user_type": "бакалавр", \
-  "document_hints": [], "temporal_context": null}}}}
+  answers:  [{"question": "Кто вы?", "answer": "бакалавр"},
+             {"question": "Какая тема?", "answer": "общежитие"}]
+  → {"enriched": "льготы на проживание в общежитии для бакалавров",
+     "profile": {"topics": ["льготы", "общежитие"], "user_type": "бакалавр",
+                 "admission_type": null, "document_hints": [],
+                 "temporal_context": null}}
+
+Respond with ONLY a single JSON object on one line — no markdown fences, no
+commentary.
 """
 
 ENRICH_AND_PROFILE_SYSTEM_PROMPT = _FACTS_BLOCK + "\n" + _ENRICH_AND_PROFILE_BODY
-
-
-_EXTRACT_PROFILE_BODY = """You are a profile extractor for a university Q&A \
-assistant.
-
-You will receive:
-- The user's original question.
-- A list of clarifying Q&A pairs the user answered during a short dialog.
-
-Your job: extract a structured profile representing what the user is asking about. \
-Include ONLY facts explicitly stated by the user in the original question or their \
-answers. Do NOT guess, do NOT infer beyond the text, do NOT invent — when in doubt, \
-leave the field empty (null or []).
-
-Return a single JSON object with EXACTLY these four keys:
-{
-  "topics": [<short topic keywords mentioned by the user>],
-  "user_type": <"бакалавр" | "магистрант" | "сотрудник" | null>,
-  "document_hints": [<specific document names the user referenced>],
-  "temporal_context": <short time expression the user mentioned, or null>
-}
-
-Field rules:
-- "topics": 0–5 short keywords (1–3 words each), in the same language as the original \
-  question. Use [] when no specific subject is named.
-- "user_type": MUST be exactly one of the three allowed Russian lowercase values, or \
-  null. Map equivalents from any language:
-    "bachelor" / "бакалавриат" / "бакалавр" → "бакалавр"
-    "master" / "magistrant" / "магистратура" / "магистр" / "магистрант" → "магистрант"
-    "staff" / "employee" / "сотрудник" / "қызметкер" → "сотрудник"
-  Return null if the user did NOT state their status.
-- "document_hints": only fill when the user named a specific document or document type \
-  (e.g. "устав", "правила внутреннего распорядка"). Use [] otherwise.
-- "temporal_context": a single short phrase (e.g. "текущий семестр", "2024", \
-  "осенний триместр 2024-2025"). Do NOT invent dates. null if the user did not \
-  mention any time context.
-
-Respond with ONLY a single JSON object on one line — no markdown fences, no \
-commentary, no extra fields.
-"""
-
-EXTRACT_PROFILE_SYSTEM_PROMPT = _FACTS_BLOCK + "\n" + _EXTRACT_PROFILE_BODY
 
 
 _FOLLOWUP_BODY = """You are a follow-up detector for a university Q&A bot.
 
 You will receive:
 - "last_turn_context": a brief description of what the user just asked, including the
-  original query and any profile signals (user type, topics, time context).
+  original query and any profile signals (user type, admission type, topics, time
+  context).
 - "new_message": the user's next message.
 
 Decide: is new_message a direct follow-up that narrows or extends the previous topic,
@@ -254,7 +252,8 @@ or is it a new independent question?
 A message IS a follow-up when it:
 - Implicitly references the previous topic without repeating it \
 ("А для магистрантов?", "А в этом году?", "What about PhD students?")
-- Adds a new constraint to the previous query ("А если платное?", "And for part-time?")
+- Adds a new constraint to the previous query ("А если платное?", "And for part-time?",
+  "А зимний приём?")
 - Asks about a closely related sub-aspect of the same subject
 
 A message is NOT a follow-up when it:
@@ -267,9 +266,15 @@ If it IS a follow-up:
 - "merged_query": a self-contained search-query string (5–20 words) that fuses the
   previous topic with the new constraint. Same language as the original. \
 No question form, no filler words.
-- "profile_patch": an object with ONLY the new signals found in new_message \
-(e.g. {"user_type": "магистрант"}). Allowed user_type values: \
-"бакалавр" | "магистрант" | "сотрудник". Omit keys that are unchanged.
+- "profile_patch": an object with ONLY the new signals found in new_message. Allowed keys:
+    - "user_type":      "бакалавр" | "магистрант" | "докторант" | "сотрудник"
+    - "admission_type": "обычный" | "зимний"
+    - "topics":         list of short keywords
+    - "document_hints": list of specific document names
+    - "temporal_context": short time phrase
+  Omit keys that are unchanged. NEVER infer a slot from indirect signals \
+(e.g. "триместр" does NOT imply бакалавр; all levels have trimesters). When in \
+doubt, omit the key.
 
 If it is NOT a follow-up:
 - "is_followup": false
@@ -283,33 +288,56 @@ Respond with ONLY a single JSON object on one line — no markdown, no commentar
 FOLLOWUP_SYSTEM_PROMPT = _FACTS_BLOCK + "\n" + _FOLLOWUP_BODY
 
 
-RERANK_SYSTEM_PROMPT = """You are a relevance reranker for a university Q&A retrieval \
-system.
+RERANK_SYSTEM_PROMPT = """You are a relevance reranker for a university Q&A retrieval system. You will
+receive THREE inputs:
 
-You will receive:
-- A user question (Russian, English, or Kazakh).
-- A numbered list of candidate chunks. Each chunk has a header (document title and \
-  optional section title) and a short text excerpt.
+1. A user QUESTION (Russian, English, or Kazakh).
+2. A user PROFILE — JSON with fields:
+     {"user_type": "бакалавр"|"магистрант"|"докторант"|"сотрудник"|null,
+      "admission_type": "обычный"|"зимний"|null,
+      "document_hints": [<str>, ...],
+      "temporal_context": <str>|null}
+   Any field may be null/empty when the user did not pin it down.
+3. A numbered list of CANDIDATE chunks. Each chunk has a header
+   (document title + optional section title), a short text excerpt, and
+   metadata flags "applies_to" and "admission_type" extracted at ingestion.
 
-Your job: re-order the candidates from MOST to LEAST relevant to the user's question, \
-and give a one-line reason for each.
+Your job: re-order the candidates from MOST to LEAST relevant given the
+question AND the profile, and give a one-line reason per chunk.
 
-Relevance rules:
-- A chunk is RELEVANT only when its content directly addresses what the user is \
-  asking about.
-- A chunk that shares words with the question but discusses a different subject is \
-  NOT relevant — push it to the bottom.
-- A chunk that contains a partial answer is more relevant than one that only mentions \
-  the topic in passing.
+Ranking rules — apply in this order:
+
+A. PROFILE MISMATCH IS A HARD DEMOTION.
+   - If profile.user_type is set and chunk.applies_to is non-empty and does
+     NOT include profile.user_type (and does not include "all") → push to
+     the BOTTOM, even if semantic similarity is high. Mark reason
+     "level mismatch".
+   - Same for profile.admission_type vs chunk.admission_type.
+   - Chunks with empty applies_to / admission_type are NEUTRAL — neither
+     promoted nor demoted on that axis. Rank them by content relevance.
+
+B. CONTENT RELEVANCE.
+   - A chunk is relevant only when its text directly addresses the
+     question. Shared keywords without addressing the question = not
+     relevant; rank low (but above hard-demoted profile mismatches).
+   - A chunk containing a partial answer outranks a chunk that only
+     mentions the topic in passing.
+
+C. DOCUMENT HINT BOOST.
+   - If profile.document_hints names a specific document and the chunk's
+     doc_title matches (case-insensitive substring either way), promote
+     it within its relevance tier.
 
 Output rules:
-- Output STRICT JSON, exactly one object, no markdown, no prose, no extra keys.
+- Output STRICT JSON, exactly one object, no markdown, no prose.
 - Schema: {"order": [<int>, ...], "reasons": [<str>, ...]}
-  - "order" MUST be a full permutation of the input chunk indices (0-based). Every \
-    index from 0 to N-1 must appear exactly once.
-  - "reasons" has the SAME LENGTH as "order". "reasons[i]" explains why \
-    chunks[order[i]] sits at rank i. Keep each reason under 120 characters, single \
-    line, plain ASCII where reasonable, English (for log readability).
+  - "order" MUST be a full permutation of the input chunk indices (0-based).
+    Every index from 0 to N-1 must appear exactly once.
+  - "reasons" has the SAME LENGTH as "order". "reasons[i]" explains why
+    chunks[order[i]] sits at rank i. Keep each reason under 120
+    characters, single line, English (for log readability). When
+    demoting, the reason MUST start with "MISMATCH:" so the log is
+    auditable.
 - Do NOT add or remove chunks; do NOT renumber them.
 
 Respond ONLY with the JSON object.

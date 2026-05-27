@@ -24,10 +24,13 @@ logger = logging.getLogger(__name__)
 class ClassificationResult(TypedDict):
     needs_clarification: bool
     reason: str
+    required_slots: list[str]
     confidence: float
 
 
 _VALID_REASONS = {"specific", "vague_topic", "ambiguous"}
+_VALID_SLOTS = ("level", "admission_type", "year", "topic", "document")
+_VALID_SLOTS_SET = set(_VALID_SLOTS)
 
 # ---------------------------------------------------------------------------
 # In-memory classification cache
@@ -73,12 +76,32 @@ _CLASSIFY_JSON_SCHEMA = {
         "properties": {
             "needs_clarification": {"type": "boolean"},
             "reason": {"type": "string", "enum": sorted(_VALID_REASONS)},
+            "required_slots": {
+                "type": "array",
+                "items": {"type": "string", "enum": list(_VALID_SLOTS)},
+                "uniqueItems": True,
+            },
             "confidence": {"type": "number", "minimum": 0.0, "maximum": 1.0},
         },
-        "required": ["needs_clarification", "reason", "confidence"],
+        "required": ["needs_clarification", "reason", "required_slots", "confidence"],
         "additionalProperties": False,
     },
 }
+
+
+def _coerce_required_slots(raw) -> list[str]:
+    if not isinstance(raw, list):
+        return []
+    seen: set[str] = set()
+    out: list[str] = []
+    for item in raw:
+        if not isinstance(item, str):
+            continue
+        s = item.strip()
+        if s in _VALID_SLOTS_SET and s not in seen:
+            seen.add(s)
+            out.append(s)
+    return out
 
 
 def _describe_choice(choice) -> str:
@@ -167,6 +190,9 @@ async def classify_intent(question: str) -> ClassificationResult:
         reason = str(data.get("reason", "")).strip()
         if reason not in _VALID_REASONS:
             reason = "vague_topic" if needs else "specific"
+        required_slots = _coerce_required_slots(data.get("required_slots"))
+        if not needs:
+            required_slots = []
         try:
             confidence = float(data["confidence"])
             if not (0.0 <= confidence <= 1.0):
@@ -181,10 +207,15 @@ async def classify_intent(question: str) -> ClassificationResult:
         else:
             conf_label = "direct-search"
         logger.debug(
-            "classify_intent q=%.80r → needs_clarification=%s reason=%s confidence=%.2f (%s)",
-            question, needs, reason, confidence, conf_label,
+            "classify_intent q=%.80r → needs_clarification=%s reason=%s required_slots=%s confidence=%.2f (%s)",
+            question, needs, reason, required_slots, confidence, conf_label,
         )
-        result = ClassificationResult(needs_clarification=needs, reason=reason, confidence=confidence)
+        result = ClassificationResult(
+            needs_clarification=needs,
+            reason=reason,
+            required_slots=required_slots,
+            confidence=confidence,
+        )
         _cache_put(key, result)
         return result
     except Exception:
@@ -197,7 +228,17 @@ async def classify_intent(question: str) -> ClassificationResult:
             from rag.dialog.triage import _STOPWORDS, _tokenize
             tokens = _tokenize(question)
             if len(tokens) <= 1 or all(t in _STOPWORDS for t in tokens):
-                return ClassificationResult(needs_clarification=True, reason="too_short", confidence=0.5)
+                return ClassificationResult(
+                    needs_clarification=True,
+                    reason="ambiguous",
+                    required_slots=[],
+                    confidence=0.5,
+                )
         except Exception:
             logger.debug("classify_intent Stage 1 fallback also failed", exc_info=True)
-        return ClassificationResult(needs_clarification=False, reason="error", confidence=0.5)
+        return ClassificationResult(
+            needs_clarification=False,
+            reason="specific",
+            required_slots=[],
+            confidence=0.5,
+        )

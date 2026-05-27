@@ -387,7 +387,9 @@ async def handle_question(message: Message, state: FSMContext) -> None:
         if intent["needs_clarification"]:
             from bot.handlers.dialog import start_clarification_dialog
             await start_clarification_dialog(
-                message, question, state, classification_reason=intent["reason"]
+                message, question, state,
+                classification_reason=intent["reason"],
+                required_slots=list(intent.get("required_slots") or []),
             )
             return
 
@@ -403,7 +405,9 @@ async def handle_question(message: Message, state: FSMContext) -> None:
             ) >= 2
             if profile_strong:
                 chunks = await _retriever.search_with_profile(merged_query, saved_profile, k=10)
-                chunks = await rerank_chunks(question, chunks, k=settings.top_k)
+                chunks = await rerank_chunks(
+                    question, chunks, k=settings.top_k, profile=saved_profile,
+                )
             else:
                 chunks = await _retriever.search(merged_query)
         else:
@@ -414,7 +418,10 @@ async def handle_question(message: Message, state: FSMContext) -> None:
         return
 
     try:
-        result = await _generator.generate(question, chunks)
+        result = await _generator.generate(
+            question, chunks,
+            profile=saved_profile if is_followup else None,
+        )
     except Exception as e:
         logger.error("Generation failed for user %s: %s", user_id, e)
         await status_msg.edit_text("😔 Не удалось сформировать ответ. Попробуйте позже.")
@@ -434,7 +441,8 @@ async def handle_question(message: Message, state: FSMContext) -> None:
     # Save turn context so subsequent follow-ups can reuse it.
     from rag.dialog.enricher import UserProfile as _UserProfile
     _profile_to_save = saved_profile if is_followup else _UserProfile(
-        topics=[], user_type=None, document_hints=[], temporal_context=None,
+        topics=[], user_type=None, admission_type=None,
+        document_hints=[], temporal_context=None,
     )
     save_context(user_id, question, merged_query if is_followup else question, _profile_to_save)
 

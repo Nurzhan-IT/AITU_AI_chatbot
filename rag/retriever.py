@@ -44,6 +44,7 @@ _FACTOR_WEIGHTS: dict[str, float] = {
 _USER_TYPE_KEYWORDS: dict[str, str] = {
     "бакалавр":   "бакалавр",
     "магистрант": "магистр",
+    "докторант":  "докторант",
     "сотрудник":  "сотрудник",
 }
 
@@ -349,6 +350,9 @@ class Retriever:
                     "page_end": p.get("page_end", page),
                     "section_title": p.get("section_title", ""),
                     "paragraph_range": p.get("paragraph_range", ""),
+                    "applies_to":     p.get("applies_to", []),
+                    "admission_type": p.get("admission_type", []),
+                    "topic_tags":     p.get("topic_tags", []),
                     "score": point.score,
                     "_vector": dense_vec,
                 }
@@ -405,6 +409,9 @@ class Retriever:
                 "page_end": p.get("page_end", page),
                 "section_title": p.get("section_title", ""),
                 "paragraph_range": p.get("paragraph_range", ""),
+                "applies_to":     p.get("applies_to", []),
+                "admission_type": p.get("admission_type", []),
+                "topic_tags":     p.get("topic_tags", []),
                 "score": point.score,
             })
         logger.debug("probe_search('%s'): %d hits (k=%d)", query[:60], len(hits), limit)
@@ -467,6 +474,9 @@ class Retriever:
                     "page_end": p.get("page_end", page),
                     "section_title": p.get("section_title", ""),
                     "paragraph_range": p.get("paragraph_range", ""),
+                    "applies_to":     p.get("applies_to", []),
+                    "admission_type": p.get("admission_type", []),
+                    "topic_tags":     p.get("topic_tags", []),
                     "score": point.score,
                     "_vector": dense_vec,
                 })
@@ -529,6 +539,9 @@ class Retriever:
                 "page_end":        p.get("page_end", page),
                 "section_title":   p.get("section_title", ""),
                 "paragraph_range": p.get("paragraph_range", ""),
+                "applies_to":      p.get("applies_to", []),
+                "admission_type":  p.get("admission_type", []),
+                "topic_tags":      p.get("topic_tags", []),
                 "score":           point.score,
                 "_vector":         dense_vec,
             })
@@ -653,6 +666,9 @@ class Retriever:
                     "page_end": p.get("page_end", page),
                     "section_title": p.get("section_title", ""),
                     "paragraph_range": p.get("paragraph_range", ""),
+                    "applies_to":     p.get("applies_to", []),
+                    "admission_type": p.get("admission_type", []),
+                    "topic_tags":     p.get("topic_tags", []),
                     "score": 1.0,
                 })
             if next_offset is None:

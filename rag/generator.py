@@ -41,33 +41,87 @@ async def translate_query(question: str, target_lang: str) -> str | None:
         return None
 
 
-_SYSTEM_PROMPT = f"""You are a university consultation assistant for AITU (Astana IT University).
+_SYSTEM_PROMPT_TEMPLATE = """You are a university consultation assistant for AITU (Astana IT University).
 
-BACKGROUND — AITU structural facts you may rely on (treat as ground truth, do NOT \
+BACKGROUND — AITU structural facts you may rely on (treat as ground truth, do NOT
 contradict, do NOT invent extra courses or trimesters):
 {AITU_FACTS}
 
+USER PROFILE — what the user clarified about themselves during the dialog.
+Treat unfilled slots as UNKNOWN; never assume a default.
+{profile_block}
+
 Rules:
-1. Answer ONLY based on the provided document fragments. Do not use outside knowledge.
-   The BACKGROUND block above is the single exception: you may use it to disambiguate \
-   terminology (e.g. which trimester is "Первый" for winter admission) and to refuse \
-   to invent non-existent entities (no "4 курс бакалавриата", no "3 курс магистратуры").
-   You still MUST NOT fabricate dates, deadlines, fees, or procedures that are not in \
-   the fragments.
-2. ALWAYS cite the source inline using plain square-bracket numbers matching the fragment index,
-   e.g. [1], [2], [3]. For Russian documents write "п.X, стр.Y"; for English "Section X, p.Y".
-   FORBIDDEN citation styles: 【】, †, ※, ⟨⟩, or any other special Unicode brackets/symbols.
-   Use ONLY plain ASCII square brackets: [1], [2], etc.
-3. Quote exact figures: dates, deadlines, counts, thresholds — do not paraphrase numbers.
+1. Answer ONLY based on the provided document fragments. Do not use outside
+   knowledge. The BACKGROUND block above is the single exception: you may use it
+   to disambiguate terminology (e.g. which trimester is "Первый" for winter
+   admission) and to refuse to invent non-existent entities. You still MUST NOT
+   fabricate dates, deadlines, fees, or procedures that are not in the fragments.
+2. ALWAYS cite the source inline using plain square-bracket numbers matching the
+   fragment index, e.g. [1], [2], [3]. For Russian documents write "п.X, стр.Y";
+   for English "Section X, p.Y". FORBIDDEN citation styles: 【】, †, ※, ⟨⟩, or
+   any other special Unicode brackets/symbols. Use ONLY plain ASCII square
+   brackets: [1], [2], etc.
+3. Quote exact figures: dates, deadlines, counts, thresholds — do not paraphrase
+   numbers.
 4. Use official terms as they appear in the documents.
-5. If the question cannot be answered from the provided fragments, write exactly [NO_ANSWER] as
-   the very first token of your response, then explain why in the same language as the question.
-6. LANGUAGE RULE: The user message will state the detected query language. You MUST respond
-   in that exact language (Russian, English, or Kazakh), regardless of the document language.
-7. If the user's question depends on calendar (deadlines, exam window, trimester boundary) \
-   and the fragments cover only one admission cohort (regular vs. winter admission), say so \
-   explicitly — do not silently apply one calendar to the other.
+5. If the question cannot be answered from the provided fragments, write exactly
+   [NO_ANSWER] as the very first token of your response, then explain why in the
+   same language as the question.
+6. LANGUAGE RULE: The user message will state the detected query language. You
+   MUST respond in that exact language (Russian, English, or Kazakh), regardless
+   of the document language.
+7. PROFILE-CONSISTENCY: If USER PROFILE specifies a level (бакалавр/магистрант/
+   докторант/сотрудник) or admission type (обычный/зимний приём), answer ONLY
+   from fragments that apply to that profile. If a fragment refers to a
+   DIFFERENT profile (e.g. fragment is about магистратура but user is бакалавр),
+   do NOT use it; mention this gap explicitly instead of silently substituting.
+8. CALENDAR DISAMBIGUATION: For calendar questions (дедлайны, сессия, рубежный
+   контроль, экзамены, начало/конец триместра), the answer depends on
+   (level × admission_type). If the fragments cover MULTIPLE cohorts and the
+   user's PROFILE does not pin one down, you MUST:
+   (a) list every distinct (level, admission_type) variant you found,
+   (b) label each variant explicitly ("для бакалавров", "для магистратуры
+       зимнего приёма", ...),
+   (c) give the corresponding dates/values per variant,
+   (d) end with a one-line note that the user can narrow it down by specifying
+       level + admission type.
+   Do NOT silently apply one cohort's calendar to another.
 """
+
+
+_PROFILE_SLOTS: tuple[str, ...] = (
+    "user_type",
+    "admission_type",
+    "topics",
+    "temporal_context",
+    "document_hints",
+)
+
+
+def _format_profile_slot(value: Any) -> str:
+    if value is None:
+        return "UNKNOWN"
+    if isinstance(value, (list, tuple, set)):
+        items = [str(v).strip() for v in value if v is not None and str(v).strip()]
+        return ", ".join(items) if items else "UNKNOWN"
+    text = str(value).strip()
+    return text if text else "UNKNOWN"
+
+
+def _format_profile_block(profile: dict | None) -> str:
+    profile = profile or {}
+    return "\n".join(
+        f"- {slot}: {_format_profile_slot(profile.get(slot))}"
+        for slot in _PROFILE_SLOTS
+    )
+
+
+def _build_system_prompt(profile: dict | None) -> str:
+    return _SYSTEM_PROMPT_TEMPLATE.format(
+        AITU_FACTS=AITU_FACTS,
+        profile_block=_format_profile_block(profile),
+    )
 
 _NO_CONTEXT_PROMPT = """В базе документов не найдено релевантной информации по данному вопросу.
 Пожалуйста, переформулируйте запрос или уточните, к какому документу относится вопрос.
@@ -397,6 +451,58 @@ async def generate_document_faq(chunks: list[dict]) -> list[dict]:
     return [{"question": str(f["question"]), "answer": str(f["answer"])} for f in faqs[:10]]
 
 
+_COVERAGE_INSUFFICIENT_PREFIX = {
+    "Russian": "Уточните",
+    "English": "Please clarify",
+    "Kazakh": "Нақтылаңыз",
+}
+
+_COVERAGE_INSUFFICIENT_FALLBACK = {
+    "Russian": "Уточните ваш вопрос.",
+    "English": "Please clarify your question.",
+    "Kazakh": "Сұрағыңызды нақтылаңыз.",
+}
+
+_UNSUPPORTED_CITATIONS_MESSAGE = {
+    "Russian": (
+        "Не удалось найти источники, подтверждающие ответ. "
+        "Пожалуйста, переформулируйте вопрос."
+    ),
+    "English": (
+        "Could not find sources that support an answer. "
+        "Please rephrase your question."
+    ),
+    "Kazakh": (
+        "Жауапты қолдайтын дереккөздер табылмады. "
+        "Сұрағыңызды қайта тұжырымдаңыз."
+    ),
+}
+
+_PARTIAL_COHORT_NOTE = (
+    "NOTE: The retrieved fragments cover a DIFFERENT user profile than the "
+    "one the user clarified. Mention this gap explicitly in the answer and "
+    "do not silently apply data from the other profile."
+)
+
+
+def _coverage_clarify_text(detected_lang: str, missing: list[str]) -> str:
+    prefix = _COVERAGE_INSUFFICIENT_PREFIX.get(
+        detected_lang, _COVERAGE_INSUFFICIENT_PREFIX["Russian"]
+    )
+    cleaned = [m for m in (missing or []) if m]
+    if cleaned:
+        return f"{prefix}: {', '.join(cleaned)}"
+    return _COVERAGE_INSUFFICIENT_FALLBACK.get(
+        detected_lang, _COVERAGE_INSUFFICIENT_FALLBACK["Russian"]
+    )
+
+
+def _unsupported_citations_text(detected_lang: str) -> str:
+    return _UNSUPPORTED_CITATIONS_MESSAGE.get(
+        detected_lang, _UNSUPPORTED_CITATIONS_MESSAGE["Russian"]
+    )
+
+
 class Generator:
     def __init__(self) -> None:
         self._client = _make_llm_client()
@@ -415,7 +521,12 @@ class Generator:
         except Exception:
             return False
 
-    async def generate(self, question: str, chunks: list[dict]) -> dict:
+    async def generate(
+        self,
+        question: str,
+        chunks: list[dict],
+        profile: dict | None = None,
+    ) -> dict:
         """
         Returns:
             {
@@ -424,6 +535,9 @@ class Generator:
                 "sources": [{"doc_title": str, "filename": str, "url": str, "pages": [int, ...]}, ...]
             }
         """
+        from rag.citation_verifier import verify_citations
+        from rag.coverage_gate import check_coverage
+
         detected_lang = detect_language(question)
 
         chunks = [c for c in chunks if c.get("score", 0) >= MIN_CHUNK_SCORE]
@@ -435,38 +549,105 @@ class Generator:
             answer = await self._call_llm(question, context=None, detected_lang=detected_lang)
             return {"answer": answer, "detected_lang": detected_lang, "sources": []}
 
-        if not chunks:
-            logger.info("generate: no chunks provided, returning no-context answer")
-            answer = await self._call_llm(question, context=None, detected_lang=detected_lang)
-            return {"answer": answer, "detected_lang": detected_lang, "sources": []}
-
         _NO_ANSWER_MARKER = "[NO_ANSWER]"
 
+        # --- Coverage pre-check ------------------------------------------------
+        coverage = await check_coverage(question, profile or {}, chunks)
+        cov_verdict = coverage.get("verdict", "sufficient")
+        logger.info(
+            "generate: coverage_verdict=%s missing=%d wrong_cohort=%d",
+            cov_verdict,
+            len(coverage.get("missing") or []),
+            len(coverage.get("wrong_cohort_indices") or []),
+        )
+
+        extra_note: str | None = None
+        if cov_verdict == "insufficient":
+            answer = _coverage_clarify_text(
+                detected_lang, coverage.get("missing") or []
+            )
+            return {"answer": answer, "detected_lang": detected_lang, "sources": []}
+        if cov_verdict == "partial":
+            wrong = {int(i) for i in (coverage.get("wrong_cohort_indices") or [])}
+            if wrong:
+                chunks = [c for i, c in enumerate(chunks, 1) if i not in wrong]
+            if not chunks:
+                answer = _coverage_clarify_text(
+                    detected_lang, coverage.get("missing") or []
+                )
+                return {"answer": answer, "detected_lang": detected_lang, "sources": []}
+            extra_note = _PARTIAL_COHORT_NOTE
+
+        # --- Main generation ---------------------------------------------------
+        system_prompt = _build_system_prompt(profile)
+        if extra_note:
+            system_prompt = system_prompt.rstrip() + "\n\n" + extra_note + "\n"
+
         context = _build_context(chunks)
-        answer = await self._call_llm(question, context=context, detected_lang=detected_lang)
+        answer = await self._call_llm(
+            question,
+            context=context,
+            detected_lang=detected_lang,
+            system=system_prompt,
+        )
 
         answer = _strip_citation_artifacts(answer)
 
         if answer.lstrip().startswith(_NO_ANSWER_MARKER):
             answer = answer.lstrip()[len(_NO_ANSWER_MARKER):].strip()
-            sources = []
-        else:
-            sources = _deduplicate_sources(chunks)
+            logger.info(
+                "generate: question='%.60s' lang=%s → NO_ANSWER from LLM",
+                question, detected_lang,
+            )
+            return {"answer": answer, "detected_lang": detected_lang, "sources": []}
 
+        # --- Citation post-audit ----------------------------------------------
+        fragment_texts = [(c.get("text") or "") for c in chunks]
+        citation = await verify_citations(answer, fragment_texts)
+        cit_verdict = citation.get("verdict", "clean")
+        invalid = citation.get("invalid_citations") or []
+        logger.info(
+            "generate: citation_verdict=%s invalid=%d",
+            cit_verdict, len(invalid),
+        )
+        if cit_verdict == "unsupported":
+            logger.warning(
+                "generate: citation verifier said unsupported — invalid=%r",
+                invalid,
+            )
+            return {
+                "answer": _unsupported_citations_text(detected_lang),
+                "detected_lang": detected_lang,
+                "sources": [],
+            }
+        if cit_verdict == "minor":
+            logger.warning(
+                "generate: citation verifier flagged minor issues invalid=%r",
+                invalid,
+            )
+
+        sources = _deduplicate_sources(chunks)
         logger.info(
             "generate: question='%.60s' lang=%s → %d chunks, %d sources",
             question, detected_lang, len(chunks), len(sources),
         )
         return {"answer": answer, "detected_lang": detected_lang, "sources": sources}
 
-    async def _call_llm(self, question: str, context: str | None, detected_lang: str = "Russian") -> str:
+    async def _call_llm(
+        self,
+        question: str,
+        context: str | None,
+        detected_lang: str = "Russian",
+        system: str | None = None,
+    ) -> str:
         if context:
             user_content = (
                 f"Контекст:\n{context}\n\n"
                 f"Язык вопроса пользователя: {detected_lang}\n"
                 f"Вопрос: {question}"
             )
-            system = _SYSTEM_PROMPT
+            if system is None:
+                system = _build_system_prompt(None)
         else:
             user_content = f"Вопрос: {question}"
             system = _NO_CONTEXT_PROMPT

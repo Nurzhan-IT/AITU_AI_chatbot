@@ -51,6 +51,13 @@ class Settings(BaseSettings):
     top_k: int = Field(default=5, ge=1, le=20)
     min_chunk_score: float = Field(default=0.55, ge=0.0, le=1.0)
 
+    # Per-chunk LLM metadata extraction during ingestion (§2.1).
+    # When True, ingestion/ingest.py calls ingestion.chunk_metadata before upsert
+    # and writes applies_to / admission_type / topic_tags into each Qdrant payload.
+    # Disable for debug runs that must avoid LLM cost.
+    enable_chunk_metadata: bool = Field(default=True, alias="CHUNK_METADATA_ENABLED")
+    chunk_metadata_batch_size: int = Field(default=10, ge=1, le=50)
+
     # Intent classifier confidence thresholds (heuristic; replaced by score-based triage in phase C)
     classify_conf_high: float = Field(default=0.7, ge=0.0, le=1.0)
     classify_conf_low: float = Field(default=0.4, ge=0.0, le=1.0)

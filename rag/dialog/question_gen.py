@@ -30,9 +30,72 @@ def invalidate_docs_cache() -> None:
 
 
 class ClarificationQuestion(TypedDict):
+    slot: str
     question: str
     options: list[str]
     stop: bool
+
+
+# Keyword tables for detecting slot values explicitly named in free text.
+# Order matters: longer / more specific patterns first.
+_LEVEL_KEYWORDS: tuple[tuple[str, str], ...] = (
+    ("бакалавриат", "бакалавр"),
+    ("бакалавр", "бакалавр"),
+    ("bachelor", "бакалавр"),
+    ("магистратура", "магистрант"),
+    ("магистрант", "магистрант"),
+    ("магистр", "магистрант"),
+    ("magistrant", "магистрант"),
+    ("master", "магистрант"),
+    ("докторантура", "докторант"),
+    ("докторант", "докторант"),
+    ("doctoral", "докторант"),
+    ("phd", "докторант"),
+    ("сотрудник", "сотрудник"),
+    ("қызметкер", "сотрудник"),
+    ("staff", "сотрудник"),
+    ("employee", "сотрудник"),
+)
+
+def _detect_slots_in_text(text: str) -> dict[str, str]:
+    """Detect slot values the user explicitly named in free text.
+
+    Conservative — only matches obvious keywords, never infers across slots.
+    Handles Russian inflection for "обычный приём" / "зимний приём" by checking
+    the stem ("обычн" / "зимн") together with the presence of "приём"/"прием".
+    """
+    lower = (text or "").lower()
+    slots: dict[str, str] = {}
+    for kw, value in _LEVEL_KEYWORDS:
+        if kw in lower:
+            slots["level"] = value
+            break
+
+    has_priem = ("приём" in lower) or ("прием" in lower)
+    if "обычн" in lower and (has_priem or "regular admission" in lower):
+        slots["admission_type"] = "обычный"
+    elif "зимн" in lower and (has_priem or "winter admission" in lower):
+        slots["admission_type"] = "зимний"
+    elif "regular admission" in lower:
+        slots["admission_type"] = "обычный"
+    elif "winter admission" in lower:
+        slots["admission_type"] = "зимний"
+    return slots
+
+
+def _compute_filled_slots(original_query: str, answers: list[dict]) -> dict[str, str]:
+    """Slots already pinned by the user — either in the original query or in answers."""
+    filled = _detect_slots_in_text(original_query)
+    for a in answers or []:
+        ans = a.get("answer")
+        if ans is None:
+            continue
+        ans_text = str(ans).strip()
+        if not ans_text:
+            continue
+        for slot, value in _detect_slots_in_text(ans_text).items():
+            filled.setdefault(slot, value)
+    return filled
 
 
 async def _get_cached_docs(retriever) -> list[dict]:
@@ -102,11 +165,31 @@ async def next_clarification(
     available_docs: list[dict],
     doc_summaries: dict[str, str] | None = None,
 ) -> ClarificationQuestion:
+    original_query = state_data.get("original_query", "")
+    answers = state_data.get("answers", []) or []
+    required_slots = [
+        s for s in (state_data.get("required_slots") or []) if isinstance(s, str)
+    ]
+    filled_slots = _compute_filled_slots(original_query, answers)
+
+    # Short path: every required slot is already pinned → no LLM call.
+    # When required_slots is empty (classifier said the query is specific, or
+    # we hit a fallback) remaining is trivially empty → also short-circuit.
+    remaining = [s for s in required_slots if s not in filled_slots]
+    if not remaining:
+        logger.debug(
+            "next_clarification short path: required_slots=%s filled=%s",
+            required_slots, filled_slots,
+        )
+        return ClarificationQuestion(slot="", question="", options=[], stop=True)
+
     try:
         payload: dict = {
-            "original_query": state_data.get("original_query", ""),
+            "original_query": original_query,
+            "required_slots": required_slots,
+            "filled_slots": filled_slots,
             "rounds_done": state_data.get("rounds_done", 0),
-            "answers": state_data.get("answers", []),
+            "answers": answers,
             "available_docs": list(available_docs)[:_MAX_DOCS_IN_PAYLOAD],
         }
         if doc_summaries:
@@ -131,14 +214,17 @@ async def next_clarification(
             raise ValueError(f"No JSON object in next_clarification response: {content!r}")
 
         data = json.loads(content[start:end])
+        slot = str(data.get("slot", "")).strip()
+        if slot and slot not in {"level", "admission_type", "year", "topic", "document"}:
+            slot = ""
         question = str(data.get("question", "")).strip()
         options = _normalize_options(data.get("options", []))
         stop = bool(data.get("stop", False))
-        return ClarificationQuestion(question=question, options=options, stop=stop)
+        return ClarificationQuestion(slot=slot, question=question, options=options, stop=stop)
     except Exception:
         logger.warning(
             "next_clarification failed for original_query=%.80r; returning stop=True",
-            state_data.get("original_query", ""),
+            original_query,
             exc_info=True,
         )
-        return ClarificationQuestion(question="", options=[], stop=True)
+        return ClarificationQuestion(slot="", question="", options=[], stop=True)
