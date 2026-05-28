@@ -1,15 +1,146 @@
 import logging
+import math
+import re
+from datetime import datetime
+from difflib import SequenceMatcher
 
 import numpy as np
 from qdrant_client import AsyncQdrantClient
-from qdrant_client.models import Distance, FieldCondition, Filter, MatchValue, VectorParams
+from qdrant_client.models import (
+    Distance,
+    FieldCondition,
+    Filter,
+    Fusion,
+    FusionQuery,
+    MatchValue,
+    NamedVector,
+    Prefetch,
+    SparseIndexParams,
+    SparseVector,
+    SparseVectorParams,
+    VectorParams,
+)
 
-from config import settings
+from config import settings, TZ_UTC5
 from rag.embedder import Embedder
 
 logger = logging.getLogger(__name__)
 
 _VECTOR_SIZE = 1024
+
+# --- multi-factor scoring (Stage 4 Part B) --------------------------------
+
+_FACTOR_WEIGHTS: dict[str, float] = {
+    "semantic_sim":    0.35,
+    "user_type_match": 0.20,
+    "doc_match":       0.15,
+    "position_bonus":  0.10,
+    "recency":         0.10,
+    "section_sim":     0.10,
+}
+
+# Stems that match document text for the user_type_match factor.
+# Profile values are the lowercase Russian canonical forms from extract_profile.
+_USER_TYPE_KEYWORDS: dict[str, str] = {
+    "бакалавр":   "бакалавр",
+    "магистрант": "магистр",
+    "докторант":  "докторант",
+    "сотрудник":  "сотрудник",
+}
+
+_POSITION_TEXT_PREFIX = 1500
+_POSITION_MIN_WORD = 3
+_RECENCY_HALF_DECAY_DAYS = 365.0
+
+
+def _clamp01(x: float) -> float:
+    if x != x:  # NaN guard
+        return 0.0
+    return max(0.0, min(1.0, x))
+
+
+def _cosine(a, b) -> float:
+    va = np.asarray(a, dtype=float)
+    vb = np.asarray(b, dtype=float)
+    na = float(np.linalg.norm(va))
+    nb = float(np.linalg.norm(vb))
+    if na == 0.0 or nb == 0.0:
+        return 0.0
+    return float(np.dot(va, vb) / (na * nb))
+
+
+def _compute_factors(
+    chunk: dict,
+    user_keyword: str | None,
+    lowered_hints: list[str],
+    query_vec: list[float],
+    section_cache: dict[str, list[float]],
+    now: datetime,
+) -> dict[str, float]:
+    text = chunk.get("text") or ""
+    section_title = (chunk.get("section_title") or "").strip()
+    doc_title = (chunk.get("doc_title") or "").strip()
+
+    # semantic_sim
+    semantic_sim = _clamp01(float(chunk.get("score", 0.0) or 0.0))
+
+    # user_type_match
+    if user_keyword is None:
+        user_type_match = 0.5
+    else:
+        kw = user_keyword.lower()
+        haystack = (text.lower(), section_title.lower())
+        user_type_match = 1.0 if any(kw in h for h in haystack) else 0.0
+
+    # doc_match
+    if not lowered_hints:
+        doc_match = 0.5
+    else:
+        dt_lower = doc_title.lower()
+        doc_match = _clamp01(
+            max(SequenceMatcher(None, h, dt_lower).ratio() for h in lowered_hints)
+        )
+
+    # position_bonus
+    if section_title:
+        prefix = text[:_POSITION_TEXT_PREFIX].lower()
+        section_words = [
+            w for w in re.split(r"\W+", section_title.lower())
+            if len(w) >= _POSITION_MIN_WORD
+        ]
+        position_bonus = 1.0 if section_words and any(w in prefix for w in section_words) else 0.5
+    else:
+        position_bonus = 0.5
+
+    # recency
+    uploaded_at = chunk.get("uploaded_at") or ""
+    if uploaded_at:
+        try:
+            dt = datetime.fromisoformat(uploaded_at)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=now.tzinfo)
+            age_days = max(0.0, (now - dt).total_seconds() / 86400.0)
+            recency = _clamp01(math.exp(-age_days / _RECENCY_HALF_DECAY_DAYS))
+        except (ValueError, TypeError):
+            recency = 0.5
+    else:
+        recency = 0.5
+
+    # section_sim
+    if section_title:
+        section_vec = section_cache.get(section_title)
+        section_sim = _clamp01(_cosine(section_vec, query_vec)) if section_vec is not None else 0.5
+    else:
+        section_sim = 0.5
+
+    return {
+        "semantic_sim":    semantic_sim,
+        "user_type_match": user_type_match,
+        "doc_match":       doc_match,
+        "position_bonus":  position_bonus,
+        "recency":         recency,
+        "section_sim":     section_sim,
+    }
 
 
 def mmr(
@@ -58,15 +189,76 @@ class Retriever:
             timeout=60,
         )
         self._embedder = Embedder()
+        # Persistent cache of section_title → embedding for the section_sim factor
+        # in search_with_profile. Keyed by raw section_title string.
+        self._section_emb_cache: dict[str, list[float]] = {}
+
+        # Set on first _ensure_collection call; avoids redundant get_collection
+        # calls on every search after startup.
+        self._collection_checked: bool = False
+        # True when the collection uses named vectors ("dense") instead of the
+        # legacy single unnamed vector.  Required for all search calls once
+        # the collection is in hybrid schema.
+        self._uses_named_vectors: bool = False
+        # True when hybrid_search_enabled AND the collection has sparse vectors.
+        self._hybrid_active: bool = False
+        # BM25 corpus statistics, loaded lazily on first search when hybrid active.
+        self._bm25_stats: object | None = None   # type: BM25Stats | None
 
     async def _ensure_collection(self) -> None:
+        if self._collection_checked:
+            return
+
         exists = await self._client.collection_exists(settings.qdrant_collection)
         if not exists:
-            await self._client.create_collection(
-                collection_name=settings.qdrant_collection,
-                vectors_config=VectorParams(size=_VECTOR_SIZE, distance=Distance.COSINE),
+            if settings.hybrid_search_enabled:
+                await self._client.create_collection(
+                    collection_name=settings.qdrant_collection,
+                    vectors_config={"dense": VectorParams(size=_VECTOR_SIZE, distance=Distance.COSINE)},
+                    sparse_vectors_config={"sparse": SparseVectorParams(
+                        index=SparseIndexParams(on_disk=False)
+                    )},
+                )
+                self._uses_named_vectors = True
+                self._hybrid_active = True
+            else:
+                await self._client.create_collection(
+                    collection_name=settings.qdrant_collection,
+                    vectors_config=VectorParams(size=_VECTOR_SIZE, distance=Distance.COSINE),
+                )
+            logger.info(
+                "Created collection '%s' (hybrid=%s)",
+                settings.qdrant_collection, settings.hybrid_search_enabled,
             )
-            logger.info("Created collection '%s'", settings.qdrant_collection)
+        else:
+            info = await self._client.get_collection(settings.qdrant_collection)
+            named = isinstance(info.config.params.vectors, dict)
+            if named:
+                self._uses_named_vectors = True
+                has_sparse = bool(
+                    info.config.params.sparse_vectors
+                    and "sparse" in info.config.params.sparse_vectors
+                )
+                if settings.hybrid_search_enabled and has_sparse:
+                    self._hybrid_active = True
+                elif settings.hybrid_search_enabled:
+                    logger.warning(
+                        "HYBRID_SEARCH_ENABLED=True but collection '%s' has no sparse "
+                        "vectors — re-index all documents to activate hybrid search. "
+                        "Falling back to dense-only search for now.",
+                        settings.qdrant_collection,
+                    )
+
+        if self._hybrid_active:
+            from pathlib import Path as _Path
+            from rag.bm25 import BM25Stats
+            self._bm25_stats = BM25Stats.load(_Path(settings.bm25_stats_path))
+            logger.info(
+                "Hybrid search active: BM25 stats loaded (%d chunks)",
+                self._bm25_stats.total_chunks,
+            )
+
+        self._collection_checked = True
 
     async def ping(self) -> bool:
         try:
@@ -79,20 +271,74 @@ class Retriever:
         await self._ensure_collection()
 
         vector = await self._embedder.embed_query(query)
-        results = await self._client.search(
-            collection_name=settings.qdrant_collection,
-            query_vector=vector,
-            limit=settings.top_k * 3,
-            with_payload=True,
-            with_vectors=True,
-        )
+        prefetch_limit = settings.top_k * 3
+
+        if self._hybrid_active:
+            from rag.bm25 import tokenize as bm25_tokenize, bm25_query_vector
+            stats = self._bm25_stats
+            q_tokens = bm25_tokenize(query)
+            q_indices, q_values = bm25_query_vector(
+                q_tokens, stats.doc_freq, stats.total_chunks
+            )
+
+            if q_indices:
+                # Qdrant native RRF fusion: dense prefetch + sparse prefetch → fuse
+                response = await self._client.query_points(
+                    collection_name=settings.qdrant_collection,
+                    prefetch=[
+                        Prefetch(query=vector, using="dense", limit=prefetch_limit),
+                        Prefetch(
+                            query=SparseVector(indices=q_indices, values=q_values),
+                            using="sparse",
+                            limit=prefetch_limit,
+                        ),
+                    ],
+                    query=FusionQuery(fusion=Fusion.RRF),
+                    limit=prefetch_limit,
+                    with_payload=True,
+                    with_vectors=True,
+                )
+                points = response.points
+                logger.debug(
+                    "search('%s') hybrid RRF: %d fused hits", query[:60], len(points)
+                )
+            else:
+                # All query tokens were stopwords — fall back to dense
+                logger.debug("search('%s'): empty sparse query, using dense only", query[:60])
+                points = await self._client.search(
+                    collection_name=settings.qdrant_collection,
+                    query_vector=NamedVector(name="dense", vector=vector),
+                    limit=prefetch_limit,
+                    with_payload=True,
+                    with_vectors=True,
+                )
+        elif self._uses_named_vectors:
+            points = await self._client.search(
+                collection_name=settings.qdrant_collection,
+                query_vector=NamedVector(name="dense", vector=vector),
+                limit=prefetch_limit,
+                with_payload=True,
+                with_vectors=True,
+            )
+        else:
+            points = await self._client.search(
+                collection_name=settings.qdrant_collection,
+                query_vector=vector,
+                limit=prefetch_limit,
+                with_payload=True,
+                with_vectors=True,
+            )
 
         hits = []
-        for point in results:
+        for point in points:
             p = point.payload or {}
             filename = p.get("filename", "")
             url = f"{settings.pdf_base_url.rstrip('/')}/{filename}" if filename else ""
             page = p.get("page", 0)
+            # When vectors are named, point.vector is a dict; extract dense component
+            # for MMR diversity re-ranking.
+            raw_vec = point.vector
+            dense_vec = raw_vec["dense"] if isinstance(raw_vec, dict) else raw_vec
             hits.append(
                 {
                     "text": p.get("text", ""),
@@ -104,14 +350,72 @@ class Retriever:
                     "page_end": p.get("page_end", page),
                     "section_title": p.get("section_title", ""),
                     "paragraph_range": p.get("paragraph_range", ""),
+                    "applies_to":     p.get("applies_to", []),
+                    "admission_type": p.get("admission_type", []),
+                    "topic_tags":     p.get("topic_tags", []),
                     "score": point.score,
-                    "_vector": point.vector,
+                    "_vector": dense_vec,
                 }
             )
 
         hits = mmr(vector, hits, k=settings.top_k)
-        logger.debug("search('%s'): %d hits", query[:60], len(hits))
+        logger.debug("search('%s'): %d hits (hybrid=%s)", query[:60], len(hits), self._hybrid_active)
         return hits
+
+    async def probe_search(
+        self, query: str, k: int | None = None
+    ) -> tuple[list[dict], list[float]]:
+        """Raw top-K probe search for triage (phase C, §3.2 Stage 2).
+
+        Unlike :meth:`search`, this applies NO MMR re-ranking and does NOT cap
+        the result at ``top_k`` — Stage 3 triage needs the undistorted Qdrant
+        score distribution. Hits come back in descending score order.
+
+        Returns ``(hits, query_vector)``. The query embedding is handed back so
+        the caller can reuse it for the final retrieval (Stage 6) instead of
+        paying for a second embed call (§3.5 R3).
+        """
+        await self._ensure_collection()
+
+        vector = await self._embedder.embed_query(query)
+        limit = k if k is not None else settings.triage_probe_k
+        # probe_search is dense-only even in hybrid mode — triage Stage 3 needs
+        # undistorted cosine score distributions, not fused RRF scores.
+        query_vec_arg = (
+            NamedVector(name="dense", vector=vector)
+            if self._uses_named_vectors else vector
+        )
+        results = await self._client.search(
+            collection_name=settings.qdrant_collection,
+            query_vector=query_vec_arg,
+            limit=limit,
+            with_payload=True,
+            with_vectors=False,
+        )
+
+        hits: list[dict] = []
+        for point in results:
+            p = point.payload or {}
+            filename = p.get("filename", "")
+            url = f"{settings.pdf_base_url.rstrip('/')}/{filename}" if filename else ""
+            page = p.get("page", 0)
+            hits.append({
+                "text": p.get("text", ""),
+                "doc_title": p.get("doc_title", ""),
+                "filename": filename,
+                "url": url,
+                "uploaded_at": p.get("uploaded_at", ""),
+                "page": page,
+                "page_end": p.get("page_end", page),
+                "section_title": p.get("section_title", ""),
+                "paragraph_range": p.get("paragraph_range", ""),
+                "applies_to":     p.get("applies_to", []),
+                "admission_type": p.get("admission_type", []),
+                "topic_tags":     p.get("topic_tags", []),
+                "score": point.score,
+            })
+        logger.debug("probe_search('%s'): %d hits (k=%d)", query[:60], len(hits), limit)
+        return hits, vector
 
     async def search_multilingual(
         self,
@@ -139,9 +443,13 @@ class Retriever:
             vector = await self._embedder.embed_query(q)
             if original_query_vec is None:
                 original_query_vec = vector
+            query_vec_arg = (
+                NamedVector(name="dense", vector=vector)
+                if self._uses_named_vectors else vector
+            )
             results = await self._client.search(
                 collection_name=settings.qdrant_collection,
-                query_vector=vector,
+                query_vector=query_vec_arg,
                 limit=limit * 3,
                 with_payload=True,
                 with_vectors=True,
@@ -154,6 +462,8 @@ class Retriever:
                 filename = p.get("filename", "")
                 url = f"{settings.pdf_base_url.rstrip('/')}/{filename}" if filename else ""
                 page = p.get("page", 0)
+                raw_vec = point.vector
+                dense_vec = raw_vec["dense"] if isinstance(raw_vec, dict) else raw_vec
                 all_results.append({
                     "text": p.get("text", ""),
                     "doc_title": p.get("doc_title", ""),
@@ -164,8 +474,11 @@ class Retriever:
                     "page_end": p.get("page_end", page),
                     "section_title": p.get("section_title", ""),
                     "paragraph_range": p.get("paragraph_range", ""),
+                    "applies_to":     p.get("applies_to", []),
+                    "admission_type": p.get("admission_type", []),
+                    "topic_tags":     p.get("topic_tags", []),
                     "score": point.score,
-                    "_vector": point.vector,
+                    "_vector": dense_vec,
                 })
 
         merged = mmr(original_query_vec, all_results, k=limit)
@@ -174,6 +487,116 @@ class Retriever:
             question[:60], detected_lang, len(queries), len(merged),
         )
         return merged
+
+    async def search_with_profile(
+        self,
+        enriched_query: str,
+        profile: dict,
+        k: int | None = None,
+    ) -> list[dict]:
+        """Profile-aware multi-factor retrieval.
+
+        Pulls ``settings.top_k * 5`` candidates by cosine, then re-ranks them
+        with a weighted blend of six [0,1]-scaled factors (see _FACTOR_WEIGHTS).
+        Returns the top ``k`` chunks, each annotated with a ``factor_scores``
+        dict for debug logging. Falls back to neutral 0.5 on any missing
+        profile slot, so this method is safe to call even when ``profile`` is
+        sparse.
+        """
+        await self._ensure_collection()
+
+        query_vec = await self._embedder.embed_query(enriched_query)
+        candidate_limit = settings.top_k * 5
+        final_k = k if k is not None else settings.top_k
+
+        query_vec_arg = (
+            NamedVector(name="dense", vector=query_vec)
+            if self._uses_named_vectors else query_vec
+        )
+        results = await self._client.search(
+            collection_name=settings.qdrant_collection,
+            query_vector=query_vec_arg,
+            limit=candidate_limit,
+            with_payload=True,
+            with_vectors=True,
+        )
+
+        candidates: list[dict] = []
+        for point in results:
+            p = point.payload or {}
+            filename = p.get("filename", "")
+            url = f"{settings.pdf_base_url.rstrip('/')}/{filename}" if filename else ""
+            page = p.get("page", 0)
+            raw_vec = point.vector
+            dense_vec = raw_vec["dense"] if isinstance(raw_vec, dict) else raw_vec
+            candidates.append({
+                "text":            p.get("text", ""),
+                "doc_title":       p.get("doc_title", ""),
+                "filename":        filename,
+                "url":             url,
+                "uploaded_at":     p.get("uploaded_at", ""),
+                "page":            page,
+                "page_end":        p.get("page_end", page),
+                "section_title":   p.get("section_title", ""),
+                "paragraph_range": p.get("paragraph_range", ""),
+                "applies_to":      p.get("applies_to", []),
+                "admission_type":  p.get("admission_type", []),
+                "topic_tags":      p.get("topic_tags", []),
+                "score":           point.score,
+                "_vector":         dense_vec,
+            })
+
+        # Resolve profile-derived inputs once per call
+        user_type = profile.get("user_type") if isinstance(profile, dict) else None
+        user_keyword = _USER_TYPE_KEYWORDS.get(user_type) if isinstance(user_type, str) else None
+        hints_raw = profile.get("document_hints") if isinstance(profile, dict) else None
+        lowered_hints = [
+            h.strip().lower() for h in (hints_raw or [])
+            if isinstance(h, str) and h.strip()
+        ]
+
+        # Embed unique section titles (cached) — single batch of misses per call
+        unique_sections = {
+            (c.get("section_title") or "").strip()
+            for c in candidates
+            if (c.get("section_title") or "").strip()
+        }
+        for st in unique_sections:
+            if st in self._section_emb_cache:
+                continue
+            try:
+                self._section_emb_cache[st] = await self._embedder.embed_query(st)
+            except Exception:
+                logger.warning(
+                    "search_with_profile: failed to embed section_title=%r", st,
+                    exc_info=True,
+                )
+                # Don't cache failures — let it retry on a future request.
+
+        now = datetime.now(TZ_UTC5)
+
+        for c in candidates:
+            factors = _compute_factors(
+                chunk=c,
+                user_keyword=user_keyword,
+                lowered_hints=lowered_hints,
+                query_vec=query_vec,
+                section_cache=self._section_emb_cache,
+                now=now,
+            )
+            c["factor_scores"] = factors
+            c["final_score"] = sum(_FACTOR_WEIGHTS[k] * v for k, v in factors.items())
+
+        candidates.sort(key=lambda x: x["final_score"], reverse=True)
+        top = candidates[:final_k]
+        for c in top:
+            c.pop("_vector", None)
+
+        logger.debug(
+            "search_with_profile('%s'): %d candidates → top-%d (profile=%s)",
+            enriched_query[:60], len(candidates), len(top), profile,
+        )
+        return top
 
     async def get_all_documents(self) -> list[dict]:
         """Return unique documents (one entry per filename) stored in the collection."""
@@ -243,6 +666,9 @@ class Retriever:
                     "page_end": p.get("page_end", page),
                     "section_title": p.get("section_title", ""),
                     "paragraph_range": p.get("paragraph_range", ""),
+                    "applies_to":     p.get("applies_to", []),
+                    "admission_type": p.get("admission_type", []),
+                    "topic_tags":     p.get("topic_tags", []),
                     "score": 1.0,
                 })
             if next_offset is None:

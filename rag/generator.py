@@ -1,4 +1,6 @@
+import asyncio
 import logging
+import re
 from collections import defaultdict
 from typing import Any
 
@@ -6,6 +8,7 @@ import tiktoken
 from langdetect import detect
 
 from config import settings
+from rag.university_facts import AITU_FACTS
 
 logger = logging.getLogger(__name__)
 
@@ -38,19 +41,87 @@ async def translate_query(question: str, target_lang: str) -> str | None:
         return None
 
 
-_SYSTEM_PROMPT = """You are a university consultation assistant for AITU (Astana IT University).
+_SYSTEM_PROMPT_TEMPLATE = """You are a university consultation assistant for AITU (Astana IT University).
+
+BACKGROUND — AITU structural facts you may rely on (treat as ground truth, do NOT
+contradict, do NOT invent extra courses or trimesters):
+{AITU_FACTS}
+
+USER PROFILE — what the user clarified about themselves during the dialog.
+Treat unfilled slots as UNKNOWN; never assume a default.
+{profile_block}
 
 Rules:
-1. Answer ONLY based on the provided document fragments. Do not use outside knowledge.
-2. ALWAYS cite the source using the document title, section, and page number from the fragment
-   headers. For English documents use "Section X, p.Y"; for Russian documents use "п.X, стр.Y".
-3. Quote exact figures: dates, deadlines, counts, thresholds — do not paraphrase numbers.
+1. Answer ONLY based on the provided document fragments. Do not use outside
+   knowledge. The BACKGROUND block above is the single exception: you may use it
+   to disambiguate terminology (e.g. which trimester is "Первый" for winter
+   admission) and to refuse to invent non-existent entities. You still MUST NOT
+   fabricate dates, deadlines, fees, or procedures that are not in the fragments.
+2. ALWAYS cite the source inline using plain square-bracket numbers matching the
+   fragment index, e.g. [1], [2], [3]. For Russian documents write "п.X, стр.Y";
+   for English "Section X, p.Y". FORBIDDEN citation styles: 【】, †, ※, ⟨⟩, or
+   any other special Unicode brackets/symbols. Use ONLY plain ASCII square
+   brackets: [1], [2], etc.
+3. Quote exact figures: dates, deadlines, counts, thresholds — do not paraphrase
+   numbers.
 4. Use official terms as they appear in the documents.
-5. If the question cannot be answered from the provided fragments, write exactly [NO_ANSWER] as
-   the very first token of your response, then explain why in the same language as the question.
-6. LANGUAGE RULE: The user message will state the detected query language. You MUST respond
-   in that exact language (Russian, English, or Kazakh), regardless of the document language.
+5. If the question cannot be answered from the provided fragments, write exactly
+   [NO_ANSWER] as the very first token of your response, then explain why in the
+   same language as the question.
+6. LANGUAGE RULE: The user message will state the detected query language. You
+   MUST respond in that exact language (Russian, English, or Kazakh), regardless
+   of the document language.
+7. PROFILE-CONSISTENCY: If USER PROFILE specifies a level (бакалавр/магистрант/
+   докторант/сотрудник) or admission type (обычный/зимний приём), answer ONLY
+   from fragments that apply to that profile. If a fragment refers to a
+   DIFFERENT profile (e.g. fragment is about магистратура but user is бакалавр),
+   do NOT use it; mention this gap explicitly instead of silently substituting.
+8. CALENDAR DISAMBIGUATION: For calendar questions (дедлайны, сессия, рубежный
+   контроль, экзамены, начало/конец триместра), the answer depends on
+   (level × admission_type). If the fragments cover MULTIPLE cohorts and the
+   user's PROFILE does not pin one down, you MUST:
+   (a) list every distinct (level, admission_type) variant you found,
+   (b) label each variant explicitly ("для бакалавров", "для магистратуры
+       зимнего приёма", ...),
+   (c) give the corresponding dates/values per variant,
+   (d) end with a one-line note that the user can narrow it down by specifying
+       level + admission type.
+   Do NOT silently apply one cohort's calendar to another.
 """
+
+
+_PROFILE_SLOTS: tuple[str, ...] = (
+    "user_type",
+    "admission_type",
+    "topics",
+    "temporal_context",
+    "document_hints",
+)
+
+
+def _format_profile_slot(value: Any) -> str:
+    if value is None:
+        return "UNKNOWN"
+    if isinstance(value, (list, tuple, set)):
+        items = [str(v).strip() for v in value if v is not None and str(v).strip()]
+        return ", ".join(items) if items else "UNKNOWN"
+    text = str(value).strip()
+    return text if text else "UNKNOWN"
+
+
+def _format_profile_block(profile: dict | None) -> str:
+    profile = profile or {}
+    return "\n".join(
+        f"- {slot}: {_format_profile_slot(profile.get(slot))}"
+        for slot in _PROFILE_SLOTS
+    )
+
+
+def _build_system_prompt(profile: dict | None) -> str:
+    return _SYSTEM_PROMPT_TEMPLATE.format(
+        AITU_FACTS=AITU_FACTS,
+        profile_block=_format_profile_block(profile),
+    )
 
 _NO_CONTEXT_PROMPT = """В базе документов не найдено релевантной информации по данному вопросу.
 Пожалуйста, переформулируйте запрос или уточните, к какому документу относится вопрос.
@@ -133,6 +204,174 @@ def _make_llm_client() -> Any:
         )
 
 
+# Groq honours strict JSON Schema (response_format type "json_schema") only on a
+# subset of models; the default llama-3.3-70b-versatile supports json_object mode
+# but not json_schema. Reasoning models (gpt-oss-*) are excluded everywhere because
+# their internal reasoning tokens exhaust the classifier's small max_tokens budget,
+# leaving no room for visible output (content becomes '').
+_GROQ_JSON_SCHEMA_MODELS = frozenset({
+    "moonshotai/kimi-k2-instruct-0905",
+    "meta-llama/llama-4-maverick-17b-128e-instruct",
+    "meta-llama/llama-4-scout-17b-16e-instruct",
+})
+
+# OpenRouter reasoning models that consume tokens on hidden chain-of-thought and
+# do not reliably honour json_schema structured output.
+_OPENROUTER_REASONING_MODELS = frozenset({
+    "openai/gpt-oss-120b",
+    "openai/gpt-oss-20b",
+    "openai/o1",
+    "openai/o1-mini",
+    "openai/o3",
+    "openai/o3-mini",
+    "openai/o4-mini",
+})
+
+
+def _is_reasoning_model() -> bool:
+    """True for models whose internal reasoning tokens exhaust small token budgets."""
+    model = settings.llm_model
+    if settings.llm_provider == "openrouter":
+        return model in _OPENROUTER_REASONING_MODELS or model.startswith("openai/gpt-oss-")
+    return False
+
+
+def supports_json_schema() -> bool:
+    """Whether the configured provider/model accepts
+    response_format={"type": "json_schema", ...}.
+
+    OpenRouter forwards json_schema only for models that support it natively.
+    Reasoning models (gpt-oss-*) are excluded — they return empty content when
+    the token budget is too small for hidden reasoning + visible JSON output.
+    """
+    if settings.llm_provider == "openrouter":
+        return not _is_reasoning_model()
+    if settings.llm_provider == "groq":
+        return settings.llm_model in _GROQ_JSON_SCHEMA_MODELS
+    return False
+
+
+def supports_json_object() -> bool:
+    """Whether the configured provider/model accepts
+    response_format={"type": "json_object"}.
+    """
+    return settings.llm_provider in ("groq", "openrouter")
+
+
+# --- Triage rule-B verification (phase C3, §3.5 R1) -----------------------
+# A high top1 cosine score is not proof a chunk answers the query. Before the
+# triage cascade trusts a rule-B "specific" verdict and answers directly, this
+# one cheap LLM call confirms the single top1 chunk is actually on-point.
+
+_VERIFY_SYSTEM_PROMPT = """You are a relevance checker for a university Q&A assistant.
+
+You will receive a user QUESTION and a single document FRAGMENT that a vector \
+search ranked as the top match. Decide ONE thing: does the fragment contain \
+information that directly answers the question?
+
+- true  — the fragment directly answers the question (fully, or a clear part of it).
+- false — the fragment only shares a topic or keywords with the question, or \
+discusses a different matter; it does not actually answer it.
+
+The question and fragment may be in Russian, English, or Kazakh — judge them \
+equally regardless of language.
+
+Respond with ONLY a single JSON object on one line — no markdown, no commentary:
+{"answers_question": <true|false>}
+"""
+
+_VERIFY_JSON_SCHEMA = {
+    "name": "chunk_relevance",
+    "strict": True,
+    "schema": {
+        "type": "object",
+        "properties": {"answers_question": {"type": "boolean"}},
+        "required": ["answers_question"],
+        "additionalProperties": False,
+    },
+}
+
+# A retrieval chunk is ~400 tokens; 2000 chars covers a full chunk and caps
+# pathological outliers so the verification call stays cheap.
+_VERIFY_EXCERPT_LEN = 2000
+
+
+async def verify_chunk_answers_query(question: str, chunk: dict) -> bool:
+    """One cheap LLM call: does ``chunk`` actually answer ``question``?
+
+    Used by the triage cascade (phase C3, §3.5 R1) to confirm a rule-B
+    "specific" verdict before answering directly — a high cosine score alone is
+    not proof the chunk is on-point. Fails safe: an empty chunk or any error
+    returns False (treat as unconfirmed), so the caller demotes to the slower,
+    more thorough path rather than risk a wrong direct answer.
+    """
+    import json
+
+    text = (chunk.get("text") or "").replace("\n", " ").strip()
+    if not text:
+        return False
+    excerpt = text[:_VERIFY_EXCERPT_LEN]
+
+    doc_title = (chunk.get("doc_title") or "").strip()
+    section = (chunk.get("section_title") or "").strip()
+    header = f"{doc_title} — {section}" if doc_title and section else (doc_title or section)
+    user_content = (
+        f"QUESTION:\n{question}\n\n"
+        f"FRAGMENT{f' ({header})' if header else ''}:\n{excerpt}"
+    )
+
+    try:
+        client = _make_llm_client()
+        request_kwargs: dict = {
+            "model": settings.llm_model,
+            "messages": [
+                {"role": "system", "content": _VERIFY_SYSTEM_PROMPT},
+                {"role": "user", "content": user_content},
+            ],
+            "temperature": 0,
+            "max_tokens": 20,
+        }
+        if supports_json_schema():
+            request_kwargs["response_format"] = {
+                "type": "json_schema",
+                "json_schema": _VERIFY_JSON_SCHEMA,
+            }
+        response = await asyncio.wait_for(
+            client.chat.completions.create(**request_kwargs),
+            timeout=5.0,
+        )
+        content = response.choices[0].message.content or ""
+
+        start = content.find("{")
+        end = content.rfind("}") + 1
+        if start == -1 or end == 0:
+            raise ValueError(f"No JSON object in verifier response: {content!r}")
+        data = json.loads(content[start:end])
+        if "answers_question" not in data:
+            raise ValueError(f"Verifier response missing answers_question: {data!r}")
+
+        confirmed = bool(data["answers_question"])
+        logger.debug(
+            "verify_chunk_answers_query: q=%.60r doc=%.40r → confirmed=%s",
+            question, doc_title, confirmed,
+        )
+        return confirmed
+    except Exception:
+        logger.warning(
+            "verify_chunk_answers_query failed for q=%.80r; treating as unconfirmed",
+            question, exc_info=True,
+        )
+        return False
+
+
+_CITATION_JUNK_RE = re.compile(r"【[^】]*】|〔[^〕]*〕|⟨[^⟩]*⟩|\†|\※")
+
+
+def _strip_citation_artifacts(text: str) -> str:
+    """Remove LLM citation markers that use non-standard Unicode brackets."""
+    return _CITATION_JUNK_RE.sub("", text)
+
+
 MIN_CHUNK_SCORE = 0.55
 
 _FAQ_SYSTEM_PROMPT = """You are an assistant that creates FAQ entries for a university document.
@@ -151,6 +390,34 @@ Rules:
 - Base answers strictly on the provided document content.
 - Make questions practical and relevant for students.
 """
+
+
+_DOC_SUMMARY_SYSTEM_PROMPT = """\
+You summarize university regulation documents for a Q&A assistant. \
+Write exactly 1–2 sentences in Russian describing what this document covers: \
+its main topic, who it applies to, and what it regulates. \
+Be specific and concrete. \
+Output plain text only — no bullet points, no headers, no JSON.\
+"""
+
+
+async def generate_doc_summary(doc_title: str, text_excerpt: str) -> str:
+    """Generate a 1–2 sentence Russian description of a document from its opening text.
+
+    Used at ingestion time so clarification dialogs can present meaningful
+    document options to the user (§4.7).
+    """
+    client = _make_llm_client()
+    response = await client.chat.completions.create(
+        model=settings.llm_model,
+        messages=[
+            {"role": "system", "content": _DOC_SUMMARY_SYSTEM_PROMPT},
+            {"role": "user", "content": f"Документ: {doc_title}\n\nОтрывок:\n{text_excerpt}"},
+        ],
+        temperature=0.1,
+        max_tokens=150,
+    )
+    return (response.choices[0].message.content or "").strip()
 
 
 async def generate_document_faq(chunks: list[dict]) -> list[dict]:
@@ -184,6 +451,58 @@ async def generate_document_faq(chunks: list[dict]) -> list[dict]:
     return [{"question": str(f["question"]), "answer": str(f["answer"])} for f in faqs[:10]]
 
 
+_COVERAGE_INSUFFICIENT_PREFIX = {
+    "Russian": "Уточните",
+    "English": "Please clarify",
+    "Kazakh": "Нақтылаңыз",
+}
+
+_COVERAGE_INSUFFICIENT_FALLBACK = {
+    "Russian": "Уточните ваш вопрос.",
+    "English": "Please clarify your question.",
+    "Kazakh": "Сұрағыңызды нақтылаңыз.",
+}
+
+_UNSUPPORTED_CITATIONS_MESSAGE = {
+    "Russian": (
+        "Не удалось найти источники, подтверждающие ответ. "
+        "Пожалуйста, переформулируйте вопрос."
+    ),
+    "English": (
+        "Could not find sources that support an answer. "
+        "Please rephrase your question."
+    ),
+    "Kazakh": (
+        "Жауапты қолдайтын дереккөздер табылмады. "
+        "Сұрағыңызды қайта тұжырымдаңыз."
+    ),
+}
+
+_PARTIAL_COHORT_NOTE = (
+    "NOTE: The retrieved fragments cover a DIFFERENT user profile than the "
+    "one the user clarified. Mention this gap explicitly in the answer and "
+    "do not silently apply data from the other profile."
+)
+
+
+def _coverage_clarify_text(detected_lang: str, missing: list[str]) -> str:
+    prefix = _COVERAGE_INSUFFICIENT_PREFIX.get(
+        detected_lang, _COVERAGE_INSUFFICIENT_PREFIX["Russian"]
+    )
+    cleaned = [m for m in (missing or []) if m]
+    if cleaned:
+        return f"{prefix}: {', '.join(cleaned)}"
+    return _COVERAGE_INSUFFICIENT_FALLBACK.get(
+        detected_lang, _COVERAGE_INSUFFICIENT_FALLBACK["Russian"]
+    )
+
+
+def _unsupported_citations_text(detected_lang: str) -> str:
+    return _UNSUPPORTED_CITATIONS_MESSAGE.get(
+        detected_lang, _UNSUPPORTED_CITATIONS_MESSAGE["Russian"]
+    )
+
+
 class Generator:
     def __init__(self) -> None:
         self._client = _make_llm_client()
@@ -202,7 +521,12 @@ class Generator:
         except Exception:
             return False
 
-    async def generate(self, question: str, chunks: list[dict]) -> dict:
+    async def generate(
+        self,
+        question: str,
+        chunks: list[dict],
+        profile: dict | None = None,
+    ) -> dict:
         """
         Returns:
             {
@@ -211,6 +535,9 @@ class Generator:
                 "sources": [{"doc_title": str, "filename": str, "url": str, "pages": [int, ...]}, ...]
             }
         """
+        from rag.citation_verifier import verify_citations
+        from rag.coverage_gate import check_coverage
+
         detected_lang = detect_language(question)
 
         chunks = [c for c in chunks if c.get("score", 0) >= MIN_CHUNK_SCORE]
@@ -222,36 +549,105 @@ class Generator:
             answer = await self._call_llm(question, context=None, detected_lang=detected_lang)
             return {"answer": answer, "detected_lang": detected_lang, "sources": []}
 
-        if not chunks:
-            logger.info("generate: no chunks provided, returning no-context answer")
-            answer = await self._call_llm(question, context=None, detected_lang=detected_lang)
-            return {"answer": answer, "detected_lang": detected_lang, "sources": []}
-
         _NO_ANSWER_MARKER = "[NO_ANSWER]"
 
+        # --- Coverage pre-check ------------------------------------------------
+        coverage = await check_coverage(question, profile or {}, chunks)
+        cov_verdict = coverage.get("verdict", "sufficient")
+        logger.info(
+            "generate: coverage_verdict=%s missing=%d wrong_cohort=%d",
+            cov_verdict,
+            len(coverage.get("missing") or []),
+            len(coverage.get("wrong_cohort_indices") or []),
+        )
+
+        extra_note: str | None = None
+        if cov_verdict == "insufficient":
+            answer = _coverage_clarify_text(
+                detected_lang, coverage.get("missing") or []
+            )
+            return {"answer": answer, "detected_lang": detected_lang, "sources": []}
+        if cov_verdict == "partial":
+            wrong = {int(i) for i in (coverage.get("wrong_cohort_indices") or [])}
+            if wrong:
+                chunks = [c for i, c in enumerate(chunks, 1) if i not in wrong]
+            if not chunks:
+                answer = _coverage_clarify_text(
+                    detected_lang, coverage.get("missing") or []
+                )
+                return {"answer": answer, "detected_lang": detected_lang, "sources": []}
+            extra_note = _PARTIAL_COHORT_NOTE
+
+        # --- Main generation ---------------------------------------------------
+        system_prompt = _build_system_prompt(profile)
+        if extra_note:
+            system_prompt = system_prompt.rstrip() + "\n\n" + extra_note + "\n"
+
         context = _build_context(chunks)
-        answer = await self._call_llm(question, context=context, detected_lang=detected_lang)
+        answer = await self._call_llm(
+            question,
+            context=context,
+            detected_lang=detected_lang,
+            system=system_prompt,
+        )
+
+        answer = _strip_citation_artifacts(answer)
 
         if answer.lstrip().startswith(_NO_ANSWER_MARKER):
             answer = answer.lstrip()[len(_NO_ANSWER_MARKER):].strip()
-            sources = []
-        else:
-            sources = _deduplicate_sources(chunks)
+            logger.info(
+                "generate: question='%.60s' lang=%s → NO_ANSWER from LLM",
+                question, detected_lang,
+            )
+            return {"answer": answer, "detected_lang": detected_lang, "sources": []}
 
+        # --- Citation post-audit ----------------------------------------------
+        fragment_texts = [(c.get("text") or "") for c in chunks]
+        citation = await verify_citations(answer, fragment_texts)
+        cit_verdict = citation.get("verdict", "clean")
+        invalid = citation.get("invalid_citations") or []
+        logger.info(
+            "generate: citation_verdict=%s invalid=%d",
+            cit_verdict, len(invalid),
+        )
+        if cit_verdict == "unsupported":
+            logger.warning(
+                "generate: citation verifier said unsupported — invalid=%r",
+                invalid,
+            )
+            return {
+                "answer": _unsupported_citations_text(detected_lang),
+                "detected_lang": detected_lang,
+                "sources": [],
+            }
+        if cit_verdict == "minor":
+            logger.warning(
+                "generate: citation verifier flagged minor issues invalid=%r",
+                invalid,
+            )
+
+        sources = _deduplicate_sources(chunks)
         logger.info(
             "generate: question='%.60s' lang=%s → %d chunks, %d sources",
             question, detected_lang, len(chunks), len(sources),
         )
         return {"answer": answer, "detected_lang": detected_lang, "sources": sources}
 
-    async def _call_llm(self, question: str, context: str | None, detected_lang: str = "Russian") -> str:
+    async def _call_llm(
+        self,
+        question: str,
+        context: str | None,
+        detected_lang: str = "Russian",
+        system: str | None = None,
+    ) -> str:
         if context:
             user_content = (
                 f"Контекст:\n{context}\n\n"
                 f"Язык вопроса пользователя: {detected_lang}\n"
                 f"Вопрос: {question}"
             )
-            system = _SYSTEM_PROMPT
+            if system is None:
+                system = _build_system_prompt(None)
         else:
             user_content = f"Вопрос: {question}"
             system = _NO_CONTEXT_PROMPT
@@ -264,6 +660,7 @@ class Generator:
                     {"role": "user", "content": user_content},
                 ],
                 temperature=0.2,
+                max_tokens=1500,
             )
             return response.choices[0].message.content or ""
         except Exception as e:

@@ -116,6 +116,16 @@ async def init_db(db_path: str = "data/bot.db", log_path: str = "duplicate_detec
         await db.commit()
 
         await db.executescript("""
+            CREATE TABLE IF NOT EXISTS doc_summaries (
+                filename   TEXT PRIMARY KEY,
+                doc_title  TEXT NOT NULL,
+                summary    TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
+        """)
+        await db.commit()
+
+        await db.executescript("""
 
             CREATE TABLE IF NOT EXISTS query_logs (
                 id            INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -126,7 +136,8 @@ async def init_db(db_path: str = "data/bot.db", log_path: str = "duplicate_detec
                 sources       TEXT,
                 answer_length INTEGER,
                 timestamp     TEXT    NOT NULL,
-                feedback      INTEGER
+                feedback      INTEGER,
+                clarification_rounds INTEGER DEFAULT 0
             );
             CREATE INDEX IF NOT EXISTS idx_query_logs_user     ON query_logs(user_id);
             CREATE INDEX IF NOT EXISTS idx_query_logs_ts       ON query_logs(timestamp);
@@ -155,5 +166,19 @@ async def init_db(db_path: str = "data/bot.db", log_path: str = "duplicate_detec
             CREATE INDEX IF NOT EXISTS idx_document_faq_filename ON document_faq(filename);
         """)
         await db.commit()
+
+        # Idempotent migrations for query_logs columns added after initial schema.
+        for col, definition in [
+            ("clarification_rounds", "INTEGER DEFAULT 0"),
+            ("classification_reason", "TEXT"),
+            ("was_clarification_helpful", "INTEGER"),
+        ]:
+            try:
+                await db.execute(
+                    f"ALTER TABLE query_logs ADD COLUMN {col} {definition}"
+                )
+                await db.commit()
+            except aiosqlite.OperationalError:
+                pass  # column already exists
 
     logger.info("SQLite database initialised at '%s'", db_path)

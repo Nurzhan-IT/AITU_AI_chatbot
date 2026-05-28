@@ -18,8 +18,10 @@ from aiogram.types import (
 
 from bot.faq_repository import clear_document_faq
 from config import settings, TZ_UTC5
+from ingestion.convert import convert_to_pdf
 from ingestion.ingest import ingest_pdf
 from rag.retriever import Retriever
+from rag.dialog.summary_store import delete_doc_summary
 from duplicate_detection import repository, detector
 
 logger = logging.getLogger(__name__)
@@ -96,8 +98,8 @@ async def cmd_upload(message: Message, bot: Bot) -> None:
         return
 
     doc = message.document
-    if not doc.file_name or not doc.file_name.lower().endswith(".pdf"):
-        await message.answer("❌ Принимаются только PDF-файлы.")
+    if not doc.file_name or not doc.file_name.lower().endswith((".pdf", ".docx", ".doc")):
+        await message.answer("❌ Принимаются только PDF, DOCX и DOC файлы.")
         return
 
     _PDFS_DIR.mkdir(exist_ok=True)
@@ -113,7 +115,10 @@ async def cmd_upload(message: Message, bot: Bot) -> None:
         await status_msg.edit_text(f"❌ Ошибка при скачивании файла: {e}")
         return
 
-    await status_msg.edit_text("⏳ Начинаю индексацию в фоне...")
+    needs_conversion = doc.file_name.lower().endswith((".docx", ".doc"))
+    await status_msg.edit_text(
+        "⏳ Конвертирую в PDF..." if needs_conversion else "⏳ Начинаю индексацию в фоне..."
+    )
 
     title = dest.stem
 
@@ -124,18 +129,39 @@ async def cmd_upload(message: Message, bot: Bot) -> None:
             pass
 
     async def _run_ingest() -> None:
+        nonlocal dest, title
+        filename = doc.file_name
+
+        if needs_conversion:
+            try:
+                pdf_path = await convert_to_pdf(dest, _PDFS_DIR)
+            except Exception as e:
+                logger.error("Failed to convert '%s' to PDF: %s", filename, e)
+                await _progress(f"❌ Ошибка конвертации в PDF: {e}")
+                return
+
+            try:
+                dest.unlink()
+            except Exception as e:
+                logger.warning("Could not remove source file '%s': %s", dest, e)
+
+            dest = pdf_path
+            filename = pdf_path.name
+            title = pdf_path.stem
+            await _progress("⏳ Начинаю индексацию в фоне...")
+
         try:
             n_chunks = await ingest_pdf(dest, title=title, progress_cb=_progress)
         except Exception as e:
-            logger.error("Failed to ingest '%s': %s", doc.file_name, e)
+            logger.error("Failed to ingest '%s': %s", filename, e)
             await _progress(f"❌ Ошибка при индексации: {e}")
             return
 
-        await repository.record_file_event(doc.file_name, title, "uploaded", n_chunks)
-        await clear_document_faq(doc.file_name)
+        await repository.record_file_event(filename, title, "uploaded", n_chunks)
+        await clear_document_faq(filename)
 
         await _progress(
-            f"✅ <b>{doc.file_name}</b> проиндексирован.\n"
+            f"✅ <b>{filename}</b> проиндексирован.\n"
             f"Загружено чанков: <b>{n_chunks}</b>\n"
             f"⏳ Анализирую на дубликаты...",
         )
@@ -144,7 +170,7 @@ async def cmd_upload(message: Message, bot: Bot) -> None:
         try:
             found = await detector.analyze_new_document(
                 filepath=dest,
-                filename=doc.file_name,
+                filename=filename,
                 doc_title=title,
                 bot=bot,
                 admin_id=settings.admin_telegram_id,
@@ -160,7 +186,7 @@ async def cmd_upload(message: Message, bot: Bot) -> None:
             suffix = "⚠️ Анализ дубликатов не выполнен."
 
         await status_msg.edit_text(
-            f"✅ <b>{doc.file_name}</b> проиндексирован.\n"
+            f"✅ <b>{filename}</b> проиндексирован.\n"
             f"Загружено чанков: <b>{n_chunks}</b>\n{suffix}",
             parse_mode="HTML",
         )
@@ -413,6 +439,7 @@ async def cmd_delete(message: Message) -> None:
 
     await repository.record_file_event(filename, filename, "deleted", deleted)
     await clear_document_faq(filename)
+    await delete_doc_summary(filename)
 
     await message.answer(
         f"🗑️ Документ <code>{filename}</code> удалён.\n"
@@ -632,6 +659,7 @@ async def cb_delete_confirm(callback: CallbackQuery) -> None:
 
         await repository.record_file_event(filename, filename, "deleted", deleted)
         await clear_document_faq(filename)
+        await delete_doc_summary(filename)
         await callback.message.edit_text(
             f"✅ Документ <code>{filename}</code> удалён.\n"
             f"Удалено чанков: <b>{deleted}</b>",
