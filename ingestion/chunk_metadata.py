@@ -193,7 +193,7 @@ async def extract_chunk_metadata(chunk_text: str) -> dict[str, list[str]]:
                 {"role": "user", "content": f"CHUNK:\n{excerpt}"},
             ],
             temperature=0,
-            max_tokens=200,
+            max_tokens=400,
         )
         content = response.choices[0].message.content or ""
         return _parse_object(content)
@@ -252,7 +252,7 @@ async def _extract_batch(batch: list[str]) -> list[dict[str, list[str]]]:
             {"role": "user", "content": user_content},
         ],
         temperature=0,
-        max_tokens=200 * len(batch),
+        max_tokens=400 * len(batch),
     )
     content = response.choices[0].message.content or ""
     return _parse_array(content, expected_len=len(batch))
