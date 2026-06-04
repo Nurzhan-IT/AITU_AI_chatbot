@@ -21,6 +21,8 @@ logger = logging.getLogger(__name__)
 router = Router()
 _NO_PREVIEW = LinkPreviewOptions(is_disabled=True)
 
+_PAGE_SIZE = 5
+
 
 def _is_admin(message: Message) -> bool:
     return message.from_user is not None and settings.is_admin(message.from_user.id)
@@ -57,6 +59,44 @@ async def _filename_from_key(key: str) -> str | None:
     return None
 
 
+def _build_doc_list_page(docs: list, page: int) -> tuple[str, InlineKeyboardMarkup]:
+    total = len(docs)
+    total_pages = (total + _PAGE_SIZE - 1) // _PAGE_SIZE
+    start = page * _PAGE_SIZE
+    end = min(start + _PAGE_SIZE, total)
+
+    base = settings.pdf_base_url.rstrip("/")
+    lines = [
+        f"📚 <b>Выберите документ для генерации FAQ:</b>\n"
+        f"<i>Страница {page + 1} из {total_pages}</i>\n"
+    ]
+    keyboard_rows = []
+
+    for i, doc in enumerate(docs[start:end], start + 1):
+        doc_title = _html.escape(doc.get("doc_title", ""))
+        filename = doc["filename"]
+        parts = urlsplit(f"{base}/{filename}")
+        encoded_url = urlunsplit((parts.scheme, parts.netloc, quote(parts.path, safe="/"), parts.query, parts.fragment))
+        lines.append(f"{i}. <a href=\"{encoded_url}\">{doc_title}</a>")
+        key = _filename_key(filename)
+        keyboard_rows.append([
+            InlineKeyboardButton(
+                text=f"🤖 #{i}: {doc['doc_title'][:35]}",
+                callback_data=f"ai_faq_doc:{key}",
+            )
+        ])
+
+    nav = []
+    if page > 0:
+        nav.append(InlineKeyboardButton(text="◀ Назад", callback_data=f"ai_faq_page:{page - 1}"))
+    if end < total:
+        nav.append(InlineKeyboardButton(text="Вперёд ▶", callback_data=f"ai_faq_page:{page + 1}"))
+    if nav:
+        keyboard_rows.append(nav)
+
+    return "\n".join(lines), InlineKeyboardMarkup(inline_keyboard=keyboard_rows)
+
+
 @router.message(F.text == "🤖 AI FAQ")
 async def btn_ai_faq(message: Message) -> None:
     retriever = Retriever()
@@ -70,32 +110,30 @@ async def btn_ai_faq(message: Message) -> None:
         await message.answer("📭 В базе нет ни одного документа.")
         return
 
-    base = settings.pdf_base_url.rstrip("/")
-    lines = ["📚 <b>Выберите документ для генерации FAQ:</b>\n"]
-    keyboard_rows = []
-    for i, doc in enumerate(docs, 1):
-        doc_title = _html.escape(doc.get("doc_title", ""))
-        filename = doc["filename"]
-        parts = urlsplit(f"{base}/{filename}")
-        encoded_url = urlunsplit((parts.scheme, parts.netloc, quote(parts.path, safe="/"), parts.query, parts.fragment))
-        lines.append(
-            f"{i}. <a href=\"{encoded_url}\">{doc_title}</a>\n"
-            # f"   📄 <code>{_html.escape(filename)}</code>"
-        )
-        key = _filename_key(doc["filename"])
-        keyboard_rows.append([
-            InlineKeyboardButton(
-                text=f"🤖 FAQ для #{i}: {doc['doc_title'][:30]}",
-                callback_data=f"ai_faq_doc:{key}",
-            )
-        ])
+    text, markup = _build_doc_list_page(docs, page=0)
+    await message.answer(text, parse_mode="HTML", reply_markup=markup, link_preview_options=_NO_PREVIEW)
 
-    await message.answer(
-        "\n".join(lines),
-        parse_mode="HTML",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard_rows),
-        link_preview_options=_NO_PREVIEW,
-    )
+
+@router.callback_query(F.data.startswith("ai_faq_page:"))
+async def cb_ai_faq_page(callback: CallbackQuery) -> None:
+    page = int(callback.data.split(":", maxsplit=1)[1])
+    retriever = Retriever()
+    try:
+        docs = await retriever.get_all_documents()
+    except Exception as e:
+        await callback.answer(f"❌ Ошибка: {e}", show_alert=True)
+        return
+
+    if not docs:
+        await callback.answer("📭 Документов нет.", show_alert=True)
+        return
+
+    total_pages = (len(docs) + _PAGE_SIZE - 1) // _PAGE_SIZE
+    page = max(0, min(page, total_pages - 1))
+
+    text, markup = _build_doc_list_page(docs, page)
+    await callback.message.edit_text(text, parse_mode="HTML", reply_markup=markup, link_preview_options=_NO_PREVIEW)
+    await callback.answer()
 
 
 @router.callback_query(F.data.startswith("ai_faq_doc:"))

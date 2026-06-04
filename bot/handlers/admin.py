@@ -33,6 +33,7 @@ _NO_PREVIEW = LinkPreviewOptions(is_disabled=True)
 
 _PDFS_DIR = Path("pdfs")
 _WARNINGS_PAGE_SIZE = 5
+_DOCS_PAGE_SIZE = 5
 
 
 def _filename_key(filename: str) -> str:
@@ -202,7 +203,7 @@ async def cmd_upload(message: Message, bot: Bot) -> None:
 # Content builders (shared by commands and callbacks)
 # ---------------------------------------------------------------------------
 
-async def _get_list_content() -> tuple[str, InlineKeyboardMarkup | None]:
+async def _get_list_content(page: int = 1) -> tuple[str, InlineKeyboardMarkup | None]:
     retriever = Retriever()
     try:
         docs = await retriever.get_all_documents()
@@ -213,9 +214,17 @@ async def _get_list_content() -> tuple[str, InlineKeyboardMarkup | None]:
     if not docs:
         return "📭 В базе нет ни одного документа.", None
 
-    lines = ["📚 <b>Документы в базе:</b>\n"]
+    total = len(docs)
+    total_pages = math.ceil(total / _DOCS_PAGE_SIZE)
+    page = max(1, min(page, total_pages))
+    offset = (page - 1) * _DOCS_PAGE_SIZE
+    page_docs = docs[offset: offset + _DOCS_PAGE_SIZE]
+    start = offset + 1
+    end = min(offset + _DOCS_PAGE_SIZE, total)
+
+    lines = [f"📚 <b>Документы в базе ({start}–{end} из {total}):</b>\n"]
     keyboard_rows = []
-    for i, doc in enumerate(docs, 1):
+    for i, doc in enumerate(page_docs, start):
         doc_title = _html.escape(doc.get("doc_title", ""))
         url = doc.get("url", "")
         if url:
@@ -224,14 +233,22 @@ async def _get_list_content() -> tuple[str, InlineKeyboardMarkup | None]:
             title_part = f'<a href="{encoded_url}">{doc_title}</a>'
         else:
             title_part = f"<b>{doc_title}</b>"
-        lines.append(
-            f"{i}. {title_part}\n"
-        )
+        lines.append(f"{i}. {title_part}\n")
         key = _filename_key(doc["filename"])
         keyboard_rows.append([
-            InlineKeyboardButton(text=f"🗑️ Удалить #{i}",  callback_data=f"delete_ask:{key}"),
+            InlineKeyboardButton(text=f"🗑️ Удалить #{i}", callback_data=f"delete_ask:{key}"),
             InlineKeyboardButton(text=f"📜 История #{i}", callback_data=f"history:{key}"),
         ])
+
+    nav_row: list[InlineKeyboardButton] = []
+    if page > 1:
+        nav_row.append(InlineKeyboardButton(text="◀ Назад", callback_data=f"docs_page:{page - 1}"))
+    if total_pages > 1:
+        nav_row.append(InlineKeyboardButton(text=f"Стр. {page}/{total_pages}", callback_data="noop"))
+    if page < total_pages:
+        nav_row.append(InlineKeyboardButton(text="Вперёд ▶", callback_data=f"docs_page:{page + 1}"))
+    if nav_row:
+        keyboard_rows.append(nav_row)
 
     return "\n".join(lines), InlineKeyboardMarkup(inline_keyboard=keyboard_rows)
 
@@ -315,7 +332,7 @@ def _current_warnings_page(callback: CallbackQuery) -> int:
 # ---------------------------------------------------------------------------
 
 async def _list_handler(message: Message) -> None:
-    text, markup = await _get_list_content()
+    text, markup = await _get_list_content(page=1)
     await message.answer(text, parse_mode="HTML", reply_markup=markup,
                          link_preview_options=_NO_PREVIEW)
 
@@ -748,8 +765,21 @@ async def cb_history(callback: CallbackQuery) -> None:
 
 @router.callback_query(F.data == "back_to_list")
 async def cb_back_to_list(callback: CallbackQuery) -> None:
-    text, markup = await _get_list_content()
-    await callback.message.edit_text(text, parse_mode="HTML", reply_markup=markup)
+    text, markup = await _get_list_content(page=1)
+    await callback.message.edit_text(text, parse_mode="HTML", reply_markup=markup,
+                                     link_preview_options=_NO_PREVIEW)
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("docs_page:"))
+async def cb_docs_page(callback: CallbackQuery) -> None:
+    page = int(callback.data.split(":")[1])
+    text, markup = await _get_list_content(page=page)
+    try:
+        await callback.message.edit_text(text, parse_mode="HTML", reply_markup=markup,
+                                         link_preview_options=_NO_PREVIEW)
+    except Exception:
+        pass  # "message is not modified" — ignore
     await callback.answer()
 
 
@@ -762,7 +792,10 @@ async def cb_warnings_page(callback: CallbackQuery) -> None:
     page = int(callback.data.split(":")[1])
     text, markup = await _get_warnings_content(page)
     try:
-        await callback.message.edit_text(text, parse_mode="HTML", reply_markup=markup)
+        await callback.message.edit_text(
+            text, parse_mode="HTML", reply_markup=markup,
+            link_preview_options=_NO_PREVIEW,
+        )
     except Exception:
         pass  # "message is not modified" — ignore
     await callback.answer()
@@ -809,7 +842,10 @@ async def cb_resolve(callback: CallbackQuery) -> None:
     page = _current_warnings_page(callback)
     text, markup = await _get_warnings_content(page)
     try:
-        await callback.message.edit_text(text, parse_mode="HTML", reply_markup=markup)
+        await callback.message.edit_text(
+            text, parse_mode="HTML", reply_markup=markup,
+            link_preview_options=_NO_PREVIEW,
+        )
     except Exception:
         pass  # "message is not modified" — ignore
 
