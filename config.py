@@ -129,6 +129,7 @@ class Settings(BaseSettings):
     duplicate_detection_log: str = "duplicate_detection.log"
 
     # Brevo (email verification)
+    email_verification_enabled: bool = True
     brevo_api_key: str = ""
     brevo_sender_email: str = ""
     brevo_sender_name: str = "AITU Bot"

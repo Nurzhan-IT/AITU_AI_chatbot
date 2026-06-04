@@ -58,6 +58,8 @@ def _generate_code() -> str:
 
 class IsNotVerified(BaseFilter):
     async def __call__(self, message: Message) -> bool:
+        if not settings.email_verification_enabled:
+            return False
         if message.from_user is None:
             return False
         if message.from_user.id == settings.admin_telegram_id:
