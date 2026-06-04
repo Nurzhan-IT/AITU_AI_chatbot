@@ -62,7 +62,7 @@ class IsNotVerified(BaseFilter):
             return False
         if message.from_user is None:
             return False
-        if message.from_user.id == settings.admin_telegram_id:
+        if settings.is_admin(message.from_user.id):
             return False
         return not await is_user_verified(message.from_user.id)
 

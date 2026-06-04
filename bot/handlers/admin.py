@@ -66,7 +66,7 @@ def _find_similar_filename(new_name: str, existing_names: list[str], threshold: 
 # ---------------------------------------------------------------------------
 
 def _is_admin(message: Message) -> bool:
-    return message.from_user is not None and message.from_user.id == settings.admin_telegram_id
+    return message.from_user is not None and settings.is_admin(message.from_user.id)
 
 
 async def _admin_filter(message: Message) -> bool:
@@ -74,7 +74,7 @@ async def _admin_filter(message: Message) -> bool:
 
 
 async def _admin_callback_filter(callback: CallbackQuery) -> bool:
-    if callback.from_user is not None and callback.from_user.id == settings.admin_telegram_id:
+    if callback.from_user is not None and settings.is_admin(callback.from_user.id):
         return True
     logger.warning("Unauthorized admin callback attempt from user_id=%s", callback.from_user and callback.from_user.id)
     return False
@@ -173,7 +173,7 @@ async def cmd_upload(message: Message, bot: Bot) -> None:
                 filename=filename,
                 doc_title=title,
                 bot=bot,
-                admin_id=settings.admin_telegram_id,
+                admin_ids=settings.admin_telegram_ids,
             )
             suffix = (
                 f"⚠️ Найдено предупреждений: <b>{len(found)}</b>. Используйте /warnings"

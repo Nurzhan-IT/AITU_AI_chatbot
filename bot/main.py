@@ -27,7 +27,7 @@ async def on_startup(bot: Bot) -> None:
 
     me = await bot.get_me()
     logger.info("Bot started: @%s (id=%d)", me.username, me.id)
-    logger.info("Admin Telegram ID: %d", settings.admin_telegram_id)
+    logger.info("Admin Telegram IDs: %s", settings.admin_telegram_ids)
 
 
 async def on_shutdown(bot: Bot) -> None:

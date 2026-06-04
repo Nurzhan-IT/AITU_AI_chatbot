@@ -187,7 +187,7 @@ async def send_long_message(message, text: str, reply_markup=None):
 
 @router.message(Command("start"))
 async def cmd_start(message: Message) -> None:
-    if message.from_user and message.from_user.id == settings.admin_telegram_id:
+    if message.from_user and settings.is_admin(message.from_user.id):
         await message.answer(_START_TEXT, reply_markup=admin_keyboard())
     else:
         await message.answer(_START_TEXT, reply_markup=user_keyboard())

@@ -1,6 +1,6 @@
 from datetime import timezone, timedelta
 from typing import Literal
-from pydantic import Field
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # Almaty / Astana time (UTC+5, no DST)
@@ -13,7 +13,20 @@ class Settings(BaseSettings):
     # Telegram — empty defaults so offline scripts/ tools can import config
     # without a full bot .env; bot/main.py still needs a real token to start.
     telegram_token: str = ""
-    admin_telegram_id: int = 0
+    # Comma-separated list: ADMIN_TELEGRAM_ID=111,222,333
+    admin_telegram_ids: list[int] = Field(default_factory=list, validation_alias="ADMIN_TELEGRAM_ID")
+
+    @field_validator("admin_telegram_ids", mode="before")
+    @classmethod
+    def _parse_admin_ids(cls, v: object) -> list[int]:
+        if isinstance(v, str):
+            return [int(x.strip()) for x in v.split(",") if x.strip()]
+        if isinstance(v, int):
+            return [v]
+        return list(v) if v else []
+
+    def is_admin(self, user_id: int) -> bool:
+        return user_id in self.admin_telegram_ids
 
     # LLM
     llm_provider: Literal["groq", "openrouter"] = "groq"

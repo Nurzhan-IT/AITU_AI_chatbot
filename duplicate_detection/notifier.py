@@ -17,7 +17,7 @@ def _snippet(text: str) -> str:
 
 async def send_upload_warnings(
     bot: Bot,
-    admin_id: int,
+    admin_ids: list[int],
     filename: str,
     warnings: list[dict],
 ) -> None:
@@ -58,7 +58,8 @@ async def send_upload_warnings(
 
     text = "\n".join(lines)
 
-    try:
-        await bot.send_message(admin_id, text, parse_mode="HTML")
-    except Exception as exc:
-        logger.warning("Failed to send warning notification to admin %d: %s", admin_id, exc)
+    for admin_id in admin_ids:
+        try:
+            await bot.send_message(admin_id, text, parse_mode="HTML")
+        except Exception as exc:
+            logger.warning("Failed to send warning notification to admin %d: %s", admin_id, exc)

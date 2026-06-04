@@ -136,7 +136,7 @@ async def analyze_new_document(
     filename: str,
     doc_title: str,
     bot: Bot,
-    admin_id: int,
+    admin_ids: list[int],
 ) -> list[dict]:
     """Analyse a just-uploaded document for duplicates/stale content.
 
@@ -144,7 +144,7 @@ async def analyze_new_document(
     Never raises — all errors are caught and logged.
     """
     try:
-        return await _run_analysis(filepath, filename, doc_title, bot, admin_id)
+        return await _run_analysis(filepath, filename, doc_title, bot, admin_ids)
     except Exception as exc:
         logger.error(
             "Duplicate detection pipeline crashed for '%s': %s",
@@ -158,7 +158,7 @@ async def _run_analysis(
     filename: str,
     doc_title: str,
     bot: Bot,
-    admin_id: int,
+    admin_ids: list[int],
 ) -> list[dict]:
     logger.info("=" * 60)
     logger.info("START analysis: '%s' (title='%s', path=%s)", filename, doc_title, filepath)
@@ -467,6 +467,6 @@ async def _run_analysis(
     # ------------------------------------------------------------------
     # 6. Notify admin
     # ------------------------------------------------------------------
-    await notifier.send_upload_warnings(bot, admin_id, filename, saved)
+    await notifier.send_upload_warnings(bot, admin_ids, filename, saved)
 
     return saved
