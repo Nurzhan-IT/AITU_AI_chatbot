@@ -12,8 +12,9 @@ COPY main.py .
 COPY bot/ bot/
 COPY rag/ rag/
 COPY ingestion/ ingestion/
+COPY duplicate_detection/ duplicate_detection/
 
-# pdfs/ is mounted as a volume at runtime
-RUN mkdir -p pdfs
+# pdfs/ and data/ are mounted as volumes at runtime
+RUN mkdir -p pdfs data
 
 CMD ["python", "-m", "bot.main"]
