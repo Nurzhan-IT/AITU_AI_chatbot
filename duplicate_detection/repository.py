@@ -119,11 +119,17 @@ async def list_warnings(
         db.row_factory = aiosqlite.Row
         cursor = await db.execute(
             """
-            SELECT id, warning_type, new_filename, existing_filename,
-                   similarity, llm_reason, new_chunk_text, created_at
-            FROM warnings
-            WHERE resolved = ?
-            ORDER BY created_at DESC
+            SELECT w.id, w.warning_type, w.new_filename, w.existing_filename,
+                   w.similarity, w.llm_reason, w.new_chunk_text, w.created_at,
+                   (SELECT doc_title FROM file_history
+                    WHERE filename = w.new_filename AND event = 'uploaded'
+                    ORDER BY id DESC LIMIT 1) AS new_doc_title,
+                   (SELECT doc_title FROM file_history
+                    WHERE filename = w.existing_filename AND event = 'uploaded'
+                    ORDER BY id DESC LIMIT 1) AS existing_doc_title
+            FROM warnings w
+            WHERE w.resolved = ?
+            ORDER BY w.created_at DESC
             LIMIT ? OFFSET ?
             """,
             (resolved_int, limit, offset),

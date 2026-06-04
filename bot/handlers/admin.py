@@ -1,10 +1,12 @@
 import asyncio
 import hashlib
+import html as _html
 import logging
 import math
 from datetime import datetime
 from difflib import SequenceMatcher
 from pathlib import Path
+from urllib.parse import quote, urlsplit, urlunsplit
 
 from aiogram import Bot, F, Router
 from aiogram.filters import Command
@@ -13,6 +15,7 @@ from aiogram.types import (
     CallbackQuery,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
+    LinkPreviewOptions,
     Message,
 )
 
@@ -26,6 +29,7 @@ from duplicate_detection import repository, detector
 
 logger = logging.getLogger(__name__)
 router = Router()
+_NO_PREVIEW = LinkPreviewOptions(is_disabled=True)
 
 _PDFS_DIR = Path("pdfs")
 _WARNINGS_PAGE_SIZE = 5
@@ -212,9 +216,16 @@ async def _get_list_content() -> tuple[str, InlineKeyboardMarkup | None]:
     lines = ["📚 <b>Документы в базе:</b>\n"]
     keyboard_rows = []
     for i, doc in enumerate(docs, 1):
+        doc_title = _html.escape(doc.get("doc_title", ""))
+        url = doc.get("url", "")
+        if url:
+            parts = urlsplit(url)
+            encoded_url = urlunsplit((parts.scheme, parts.netloc, quote(parts.path, safe="/"), parts.query, parts.fragment))
+            title_part = f'<a href="{encoded_url}">{doc_title}</a>'
+        else:
+            title_part = f"<b>{doc_title}</b>"
         lines.append(
-            f"{i}. <b>{doc['doc_title']}</b>\n"
-            f"   📄 <code>{doc['filename']}</code>"
+            f"{i}. {title_part}\n"
         )
         key = _filename_key(doc["filename"])
         keyboard_rows.append([
@@ -243,15 +254,26 @@ async def _get_warnings_content(page: int) -> tuple[str, InlineKeyboardMarkup]:
     lines = [f"📋 <b>Предупреждения ({start}–{end} из {total})</b>\n"]
     keyboard_rows = []
 
+    base = settings.pdf_base_url.rstrip("/")
     for row in rows:
         wtype = row["warning_type"]
         badge = "🔁 DUPLICATE" if wtype == "DUPLICATE" else "📅 STALE"
         sim = f"{row['similarity']:.0%}"
         date = row["created_at"][:10]
+
+        def _doc_link(filename: str, doc_title: str | None) -> str:
+            label = _html.escape(doc_title or filename)
+            parts = urlsplit(f"{base}/{filename}")
+            encoded = urlunsplit((parts.scheme, parts.netloc, quote(parts.path, safe="/"), parts.query, parts.fragment))
+            return f'<a href="{encoded}">{label}</a>'
+
+        new_link = _doc_link(row["new_filename"], row.get("new_doc_title"))
+        ex_link = _doc_link(row["existing_filename"], row.get("existing_doc_title"))
+
         lines.append(
             f"[<b>#{row['id']}</b>] {badge}\n"
-            f"  Новый: <code>{row['new_filename']}</code>\n"
-            f"  Существующий: <code>{row['existing_filename']}</code>\n"
+            f"  Новый: {new_link}\n"
+            f"  Существующий: {ex_link}\n"
             f"  Сходство: {sim}  |  {date}"
         )
         if wtype == "STALE" and row.get("llm_reason"):
@@ -294,12 +316,14 @@ def _current_warnings_page(callback: CallbackQuery) -> int:
 
 async def _list_handler(message: Message) -> None:
     text, markup = await _get_list_content()
-    await message.answer(text, parse_mode="HTML", reply_markup=markup)
+    await message.answer(text, parse_mode="HTML", reply_markup=markup,
+                         link_preview_options=_NO_PREVIEW)
 
 
 async def _warnings_handler(message: Message, page: int = 1) -> None:
     text, markup = await _get_warnings_content(page)
-    await message.answer(text, parse_mode="HTML", reply_markup=markup)
+    await message.answer(text, parse_mode="HTML", reply_markup=markup,
+                         link_preview_options=_NO_PREVIEW)
 
 
 async def _health_handler(message: Message) -> None:

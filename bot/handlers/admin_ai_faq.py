@@ -1,11 +1,14 @@
 import hashlib
+import html as _html
 import logging
+from urllib.parse import quote, urlsplit, urlunsplit
 
 from aiogram import F, Router
 from aiogram.types import (
     CallbackQuery,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
+    LinkPreviewOptions,
     Message,
 )
 
@@ -16,6 +19,7 @@ from rag.retriever import Retriever
 
 logger = logging.getLogger(__name__)
 router = Router()
+_NO_PREVIEW = LinkPreviewOptions(is_disabled=True)
 
 
 def _is_admin(message: Message) -> bool:
@@ -66,12 +70,17 @@ async def btn_ai_faq(message: Message) -> None:
         await message.answer("📭 В базе нет ни одного документа.")
         return
 
+    base = settings.pdf_base_url.rstrip("/")
     lines = ["📚 <b>Выберите документ для генерации FAQ:</b>\n"]
     keyboard_rows = []
     for i, doc in enumerate(docs, 1):
+        doc_title = _html.escape(doc.get("doc_title", ""))
+        filename = doc["filename"]
+        parts = urlsplit(f"{base}/{filename}")
+        encoded_url = urlunsplit((parts.scheme, parts.netloc, quote(parts.path, safe="/"), parts.query, parts.fragment))
         lines.append(
-            f"{i}. <b>{doc['doc_title']}</b>\n"
-            f"   📄 <code>{doc['filename']}</code>"
+            f"{i}. <a href=\"{encoded_url}\">{doc_title}</a>\n"
+            # f"   📄 <code>{_html.escape(filename)}</code>"
         )
         key = _filename_key(doc["filename"])
         keyboard_rows.append([
@@ -85,6 +94,7 @@ async def btn_ai_faq(message: Message) -> None:
         "\n".join(lines),
         parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard_rows),
+        link_preview_options=_NO_PREVIEW,
     )
 
 

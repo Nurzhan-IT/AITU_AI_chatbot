@@ -620,11 +620,12 @@ class Retriever:
                 filename = p.get("filename", "")
                 if filename and filename not in seen:
                     seen.add(filename)
+                    url = f"{settings.pdf_base_url.rstrip('/')}/{filename}"
                     docs.append(
                         {
                             "doc_title": p.get("doc_title", ""),
                             "filename": filename,
-                            "url": p.get("url", ""),
+                            "url": url,
                         }
                     )
 
