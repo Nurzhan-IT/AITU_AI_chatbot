@@ -1,7 +1,25 @@
+import json
 from datetime import timezone, timedelta
 from typing import Literal
 from pydantic import Field, field_validator
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic_settings import BaseSettings, SettingsConfigDict, EnvSettingsSource, DotEnvSettingsSource
+
+
+class _CommaListMixin:
+    """Allows comma-separated env list values (e.g. 1,2,3) alongside JSON arrays ([1,2,3])."""
+
+    def decode_complex_value(self, _field_name: str, _field: object, value: object) -> object:
+        if isinstance(value, str) and not value.strip().startswith(("[", "{")):
+            value = f"[{value}]"
+        return json.loads(value)  # type: ignore[arg-type]
+
+
+class _CommaListEnvSource(_CommaListMixin, EnvSettingsSource):
+    pass
+
+
+class _CommaListDotEnvSource(_CommaListMixin, DotEnvSettingsSource):
+    pass
 
 # Almaty / Astana time (UTC+5, no DST)
 TZ_UTC5 = timezone(timedelta(hours=5))
@@ -27,6 +45,24 @@ class Settings(BaseSettings):
 
     def is_admin(self, user_id: int) -> bool:
         return user_id in self.admin_telegram_ids
+
+    @classmethod
+    def settings_customise_sources(cls, settings_cls, init_settings, env_settings, dotenv_settings, file_secret_settings):
+        mc = settings_cls.model_config
+        common = {
+            "case_sensitive": mc.get("case_sensitive"),
+            "env_prefix": mc.get("env_prefix"),
+            "env_nested_delimiter": mc.get("env_nested_delimiter"),
+            "env_ignore_empty": mc.get("env_ignore_empty"),
+            "env_parse_none_str": mc.get("env_parse_none_str"),
+            "env_parse_enums": mc.get("env_parse_enums"),
+        }
+        return (
+            init_settings,
+            _CommaListEnvSource(settings_cls, **common),
+            _CommaListDotEnvSource(settings_cls, env_file=mc.get("env_file"), env_file_encoding=mc.get("env_file_encoding"), **common),
+            file_secret_settings,
+        )
 
     # LLM
     llm_provider: Literal["groq", "openrouter"] = "groq"
