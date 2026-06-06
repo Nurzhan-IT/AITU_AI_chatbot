@@ -2,8 +2,14 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-# Cyrillic font for PDF report generation
-RUN apt-get update && apt-get install -y --no-install-recommends fonts-dejavu-core && rm -rf /var/lib/apt/lists/*
+# Fonts + LibreOffice for document-to-PDF conversion
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    fonts-dejavu-core \
+    fonts-liberation \
+    libreoffice-writer \
+    libreoffice-calc \
+    libreoffice-impress \
+    && rm -rf /var/lib/apt/lists/*
 
 # Install dependencies first (layer caching)
 COPY requirements.txt .
