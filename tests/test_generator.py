@@ -1,9 +1,11 @@
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 from config import settings
 from rag.generator import (
+    Generator,
+    _PARTIAL_COHORT_NOTE,
     _build_context,
     _deduplicate_sources,
     _make_llm_client,
@@ -287,3 +289,222 @@ class TestVerifyChunkAnswersQuery:
         result = await verify_chunk_answers_query("Q?", {"text": "some fragment"})
 
         assert result is False
+
+
+# ---------------------------------------------------------------------------
+# Generator.generate() -- fully fake LLM client, no real network calls.
+#
+# check_coverage and verify_citations are imported *locally* inside
+# generate(), so patching must target their source modules
+# (rag.coverage_gate / rag.citation_verifier) -- patching rag.generator's
+# module namespace would be invisible to that local `from ... import ...`.
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def generator(monkeypatch):
+    """A Generator whose constructor doesn't hit the network -- groq.AsyncGroq
+    is mocked out so _make_llm_client() succeeds without real credentials.
+    Each test then overwrites the instance's `._client` with a fully fake client."""
+    monkeypatch.setattr(settings, "llm_provider", "groq")
+    monkeypatch.setattr(settings, "groq_api_key", "test-key")
+    monkeypatch.setattr("groq.AsyncGroq", MagicMock())
+    return Generator()
+
+
+class TestGenerateNoContext:
+    async def test_all_chunks_below_min_score_skips_coverage_and_citations(
+        self, monkeypatch, generator, fake_async_client, fake_llm_response
+    ):
+        generator._client = fake_async_client
+        fake_async_client.chat.completions.create.return_value = fake_llm_response(
+            "no context answer"
+        )
+        check_coverage_mock = AsyncMock()
+        verify_citations_mock = AsyncMock()
+        monkeypatch.setattr("rag.coverage_gate.check_coverage", check_coverage_mock)
+        monkeypatch.setattr("rag.citation_verifier.verify_citations", verify_citations_mock)
+
+        chunks = [{"text": "irrelevant", "score": 0.1, "filename": "a.pdf"}]
+        result = await generator.generate("Вопрос?", chunks)
+
+        assert result["answer"] == "no context answer"
+        assert result["sources"] == []
+        check_coverage_mock.assert_not_called()
+        verify_citations_mock.assert_not_called()
+
+
+class TestGenerateCoverageInsufficient:
+    @pytest.mark.parametrize(
+        "lang_code,expected_prefix",
+        [("ru", "Уточните"), ("en", "Please clarify"), ("kk", "Нақтылаңыз")],
+    )
+    async def test_insufficient_coverage_returns_clarify_text_in_detected_language(
+        self, monkeypatch, generator, fake_async_client, lang_code, expected_prefix
+    ):
+        monkeypatch.setattr("rag.generator.detect", lambda text: lang_code)
+        generator._client = fake_async_client
+
+        async def fake_check_coverage(question, profile, chunks):
+            return {"verdict": "insufficient", "missing": ["дата"], "wrong_cohort_indices": []}
+
+        monkeypatch.setattr("rag.coverage_gate.check_coverage", fake_check_coverage)
+
+        chunks = [{"text": "some relevant text", "score": 0.9, "filename": "a.pdf"}]
+        result = await generator.generate("Когда дедлайн?", chunks)
+
+        assert result["sources"] == []
+        assert result["answer"].startswith(expected_prefix)
+        fake_async_client.chat.completions.create.assert_not_called()
+
+
+class TestGeneratePartialCoverage:
+    async def test_all_chunks_wrong_cohort_returns_clarify_text(
+        self, monkeypatch, generator, fake_async_client
+    ):
+        generator._client = fake_async_client
+
+        async def fake_check_coverage(question, profile, chunks):
+            return {"verdict": "partial", "missing": [], "wrong_cohort_indices": [1]}
+
+        monkeypatch.setattr("rag.coverage_gate.check_coverage", fake_check_coverage)
+
+        chunks = [{"text": "text1", "score": 0.9, "filename": "a.pdf"}]
+        result = await generator.generate("Question?", chunks)
+
+        assert result["sources"] == []
+        fake_async_client.chat.completions.create.assert_not_called()
+
+    async def test_some_chunks_remaining_adds_partial_cohort_note_to_system_prompt(
+        self, monkeypatch, generator, fake_async_client, fake_llm_response
+    ):
+        generator._client = fake_async_client
+        fake_async_client.chat.completions.create.return_value = fake_llm_response("Ответ [1]")
+
+        async def fake_check_coverage(question, profile, chunks):
+            return {"verdict": "partial", "missing": [], "wrong_cohort_indices": [1]}
+
+        async def fake_verify_citations(answer, fragments):
+            return {"verdict": "clean", "invalid_citations": []}
+
+        monkeypatch.setattr("rag.coverage_gate.check_coverage", fake_check_coverage)
+        monkeypatch.setattr("rag.citation_verifier.verify_citations", fake_verify_citations)
+
+        chunks = [
+            {"text": "wrong cohort text", "score": 0.9, "filename": "a.pdf", "page": 1},
+            {"text": "correct cohort text", "score": 0.9, "filename": "b.pdf", "page": 2},
+        ]
+        result = await generator.generate("Question?", chunks)
+
+        call_kwargs = fake_async_client.chat.completions.create.call_args.kwargs
+        system_content = call_kwargs["messages"][0]["content"]
+        assert _PARTIAL_COHORT_NOTE in system_content
+        assert result["answer"] == "Ответ [1]"
+
+
+class TestGenerateNoAnswerMarker:
+    async def test_no_answer_marker_stripped_and_sources_emptied(
+        self, monkeypatch, generator, fake_async_client, fake_llm_response
+    ):
+        generator._client = fake_async_client
+        fake_async_client.chat.completions.create.return_value = fake_llm_response(
+            "[NO_ANSWER] Не могу ответить на этот вопрос."
+        )
+
+        async def fake_check_coverage(question, profile, chunks):
+            return {"verdict": "sufficient", "missing": [], "wrong_cohort_indices": []}
+
+        verify_citations_mock = AsyncMock()
+        monkeypatch.setattr("rag.coverage_gate.check_coverage", fake_check_coverage)
+        monkeypatch.setattr("rag.citation_verifier.verify_citations", verify_citations_mock)
+
+        chunks = [{"text": "text", "score": 0.9, "filename": "a.pdf"}]
+        result = await generator.generate("Question?", chunks)
+
+        assert result["answer"] == "Не могу ответить на этот вопрос."
+        assert result["sources"] == []
+        verify_citations_mock.assert_not_called()
+
+
+class TestGenerateCitationVerification:
+    async def test_unsupported_verdict_returns_localized_message_and_empty_sources(
+        self, monkeypatch, generator, fake_async_client, fake_llm_response
+    ):
+        monkeypatch.setattr("rag.generator.detect", lambda text: "ru")
+        generator._client = fake_async_client
+        fake_async_client.chat.completions.create.return_value = fake_llm_response(
+            "Ответ [1] и [2]"
+        )
+
+        async def fake_check_coverage(question, profile, chunks):
+            return {"verdict": "sufficient", "missing": [], "wrong_cohort_indices": []}
+
+        async def fake_verify_citations(answer, fragments):
+            return {
+                "verdict": "unsupported",
+                "invalid_citations": [{"index": 2, "claim": "x", "reason": "not found"}],
+            }
+
+        monkeypatch.setattr("rag.coverage_gate.check_coverage", fake_check_coverage)
+        monkeypatch.setattr("rag.citation_verifier.verify_citations", fake_verify_citations)
+
+        chunks = [{"text": "text", "score": 0.9, "filename": "a.pdf"}]
+        result = await generator.generate("Вопрос?", chunks)
+
+        assert result["sources"] == []
+        assert "Не удалось найти источники" in result["answer"]
+
+    async def test_minor_verdict_returns_answer_unchanged(
+        self, monkeypatch, generator, fake_async_client, fake_llm_response
+    ):
+        generator._client = fake_async_client
+        fake_async_client.chat.completions.create.return_value = fake_llm_response("Ответ [1]")
+
+        async def fake_check_coverage(question, profile, chunks):
+            return {"verdict": "sufficient", "missing": [], "wrong_cohort_indices": []}
+
+        async def fake_verify_citations(answer, fragments):
+            return {
+                "verdict": "minor",
+                "invalid_citations": [{"index": 1, "claim": "x", "reason": "vague"}],
+            }
+
+        monkeypatch.setattr("rag.coverage_gate.check_coverage", fake_check_coverage)
+        monkeypatch.setattr("rag.citation_verifier.verify_citations", fake_verify_citations)
+
+        chunks = [{"text": "text", "score": 0.9, "filename": "a.pdf", "page": 1}]
+        result = await generator.generate("Question?", chunks)
+
+        assert result["answer"] == "Ответ [1]"
+        assert len(result["sources"]) == 1
+
+
+class TestGenerateHappyPath:
+    async def test_chunks_with_different_filenames_produce_deduplicated_sources(
+        self, monkeypatch, generator, fake_async_client, fake_llm_response
+    ):
+        generator._client = fake_async_client
+        fake_async_client.chat.completions.create.return_value = fake_llm_response(
+            "Финальный ответ [1][2]"
+        )
+
+        async def fake_check_coverage(question, profile, chunks):
+            return {"verdict": "sufficient", "missing": [], "wrong_cohort_indices": []}
+
+        async def fake_verify_citations(answer, fragments):
+            return {"verdict": "clean", "invalid_citations": []}
+
+        monkeypatch.setattr("rag.coverage_gate.check_coverage", fake_check_coverage)
+        monkeypatch.setattr("rag.citation_verifier.verify_citations", fake_verify_citations)
+
+        chunks = [
+            {"text": "t1", "score": 0.9, "filename": "a.pdf", "doc_title": "Doc A", "url": "u1", "page": 1},
+            {"text": "t2", "score": 0.9, "filename": "a.pdf", "doc_title": "Doc A", "url": "u1", "page": 3},
+            {"text": "t3", "score": 0.9, "filename": "b.pdf", "doc_title": "Doc B", "url": "u2", "page": 5},
+        ]
+        result = await generator.generate("Question?", chunks)
+
+        assert result["answer"] == "Финальный ответ [1][2]"
+        sources_by_filename = {s["filename"]: s for s in result["sources"]}
+        assert set(sources_by_filename) == {"a.pdf", "b.pdf"}
+        assert sources_by_filename["a.pdf"]["pages"] == [1, 3]
+        assert sources_by_filename["b.pdf"]["pages"] == [5]
