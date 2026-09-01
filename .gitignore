@@ -23,6 +23,11 @@ data/
 duplicate_detection.log
 duplicate_detection.log.*
 
+# Testing
+.pytest_cache/
+htmlcov/
+.coverage
+
 # IDE
 .vscode/
 .idea/
