@@ -6,16 +6,12 @@ import re
 import uuid
 from datetime import datetime
 from pathlib import Path
-from typing import Callable, Awaitable
+from typing import Awaitable, Callable
 from urllib.parse import quote
 
+import fitz  # PyMuPDF raw text extraction for accurate page offsets
 import pymupdf4llm
-import fitz                  # PyMuPDF raw text extraction for accurate page offsets
 import tiktoken
-from ingestion.chunk_metadata import extract_chunk_metadata_batch
-from ingestion.page_classifier import classify_document, PageType
-from ingestion.page_processor import process_page
-from ingestion.post_processor import postprocess
 from qdrant_client import AsyncQdrantClient
 from qdrant_client.models import (
     Distance,
@@ -27,7 +23,11 @@ from qdrant_client.models import (
     VectorParams,
 )
 
-from config import settings, TZ_UTC5
+from config import TZ_UTC5, settings
+from ingestion.chunk_metadata import extract_chunk_metadata_batch
+from ingestion.page_classifier import PageType, classify_document
+from ingestion.page_processor import process_page
+from ingestion.post_processor import postprocess
 from rag.embedder import Embedder
 
 logger = logging.getLogger(__name__)
@@ -422,7 +422,9 @@ async def ingest_pdf(
     bm25_token_lists: list[list[str]] = []
     if settings.hybrid_search_enabled:
         from pathlib import Path as _Path
-        from rag.bm25 import BM25Stats, tokenize as bm25_tokenize
+
+        from rag.bm25 import BM25Stats
+        from rag.bm25 import tokenize as bm25_tokenize
         bm25_stats = BM25Stats.load(_Path(settings.bm25_stats_path))
         bm25_token_lists = [bm25_tokenize(t) for t in clean_texts]
         # Register new chunks into stats so avg_len reflects this batch.
@@ -519,8 +521,8 @@ async def ingest_pdf(
     # Generate and persist a 1–2 sentence document summary (§4.7 / D3).
     # Failures are logged and silently swallowed — indexing must not abort.
     try:
-        from rag.generator import generate_doc_summary
         from rag.dialog.summary_store import upsert_doc_summary
+        from rag.generator import generate_doc_summary
         excerpt = "\n\n".join(clean_texts[:5])[:3000]
         summary = await generate_doc_summary(title, excerpt)
         if summary:

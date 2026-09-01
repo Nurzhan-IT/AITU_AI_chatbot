@@ -6,7 +6,7 @@ import aiosqlite
 from aiogram import Router
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup
 
-from config import settings, TZ_UTC5
+from config import TZ_UTC5, settings
 
 logger = logging.getLogger(__name__)
 router = Router()

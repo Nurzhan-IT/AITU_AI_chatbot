@@ -11,7 +11,6 @@ section 2.1 of the parallel execution plan for the ingestion wiring.
 
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 import re

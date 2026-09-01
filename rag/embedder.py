@@ -1,6 +1,8 @@
-import math
 import logging
+import math
+
 from openai import AsyncOpenAI
+
 from config import settings
 
 logger = logging.getLogger(__name__)

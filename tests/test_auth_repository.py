@@ -3,7 +3,6 @@ import aiosqlite
 from bot.auth import repository as auth_repo
 from config import settings
 
-
 # ---------------------------------------------------------------------------
 # save_verification_code -> get_pending_verification round-trip
 # ---------------------------------------------------------------------------

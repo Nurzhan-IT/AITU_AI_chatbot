@@ -2,7 +2,7 @@ from datetime import datetime, timedelta
 
 import aiosqlite
 
-from config import settings, TZ_UTC5
+from config import TZ_UTC5, settings
 
 
 async def is_user_verified(user_id: int) -> bool:

@@ -341,7 +341,7 @@ def main() -> None:
         "k": k,
     }
 
-    print(f"=== Triage threshold calibration ===")
+    print("=== Triage threshold calibration ===")
     print(f"Source CSV : {meta['csv']}")
     print(f"Queries    : {meta['n']} rows (probe k~{k})")
     print(f"Percentiles: gap={args.gap_pct} entropy_low={args.entropy_low_pct} "

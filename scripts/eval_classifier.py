@@ -215,10 +215,14 @@ def compute_metrics_for(
                 fn += 1
             # else: error on a true-negative case — don't count as FP
             continue
-        if exp and got:     tp += 1
-        elif not exp and got: fp += 1
-        elif exp and not got: fn += 1
-        else:               tn += 1
+        if exp and got:
+            tp += 1
+        elif not exp and got:
+            fp += 1
+        elif exp and not got:
+            fn += 1
+        else:
+            tn += 1
 
     n_valid = sum(
         1 for r in results
@@ -384,7 +388,6 @@ def write_report(
     have_triage = [r for r in results if r.get("triage_needs") is not None]
     improved = [r for r in have_triage if not r["needs_ok"] and r["triage_needs_ok"]]
     regressed = [r for r in have_triage if r["needs_ok"] and not r["triage_needs_ok"]]
-    errors = [r for r in results if r.get("triage_stage") == "error"]
 
     n_errors = tri_m["n_cases"] - tri_m["n_valid"]
     f1_delta = tnc["f1"] - cnc["f1"]

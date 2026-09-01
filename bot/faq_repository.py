@@ -2,7 +2,7 @@ from datetime import datetime
 
 import aiosqlite
 
-from config import settings, TZ_UTC5
+from config import TZ_UTC5, settings
 
 
 async def get_all_faq() -> list[dict]:

@@ -1,6 +1,7 @@
 import asyncio
 import html as _html
 import logging
+import os
 import re
 import shutil
 import subprocess
@@ -269,7 +270,7 @@ async def handle_document(message: Message) -> None:
     tmp_fd, tmp_name = tempfile.mkstemp(suffix=suffix)
     tmp_path = Path(tmp_name)
     try:
-        import os; os.close(tmp_fd)
+        os.close(tmp_fd)
 
         try:
             await message.bot.download(doc, destination=tmp_path)

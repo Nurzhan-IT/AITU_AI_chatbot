@@ -2,7 +2,6 @@ import aiosqlite
 
 from bot import faq_repository as repo
 
-
 # ---------------------------------------------------------------------------
 # add_faq / edit_faq / delete_faq / get_all_faq
 # ---------------------------------------------------------------------------

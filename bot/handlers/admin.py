@@ -20,12 +20,12 @@ from aiogram.types import (
 )
 
 from bot.faq_repository import clear_document_faq
-from config import settings, TZ_UTC5
+from config import TZ_UTC5, settings
+from duplicate_detection import detector, repository
 from ingestion.convert import convert_to_pdf
 from ingestion.ingest import ingest_pdf
-from rag.retriever import Retriever
 from rag.dialog.summary_store import delete_doc_summary
-from duplicate_detection import repository, detector
+from rag.retriever import Retriever
 
 logger = logging.getLogger(__name__)
 router = Router()
@@ -229,7 +229,9 @@ async def _get_list_content(page: int = 1) -> tuple[str, InlineKeyboardMarkup | 
         url = doc.get("url", "")
         if url:
             parts = urlsplit(url)
-            encoded_url = urlunsplit((parts.scheme, parts.netloc, quote(parts.path, safe="/"), parts.query, parts.fragment))
+            encoded_url = urlunsplit(
+                (parts.scheme, parts.netloc, quote(parts.path, safe="/"), parts.query, parts.fragment)
+            )
             title_part = f'<a href="{encoded_url}">{doc_title}</a>'
         else:
             title_part = f"<b>{doc_title}</b>"
@@ -344,8 +346,8 @@ async def _warnings_handler(message: Message, page: int = 1) -> None:
 
 
 async def _health_handler(message: Message) -> None:
-    from rag.generator import Generator as Gen
     from rag.embedder import Embedder as Emb
+    from rag.generator import Generator as Gen
 
     retriever = Retriever()
     generator = Gen()

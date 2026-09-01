@@ -1,8 +1,9 @@
 import json
-from datetime import timezone, timedelta
+from datetime import timedelta, timezone
 from typing import Literal
+
 from pydantic import Field, field_validator
-from pydantic_settings import BaseSettings, SettingsConfigDict, EnvSettingsSource, DotEnvSettingsSource
+from pydantic_settings import BaseSettings, DotEnvSettingsSource, EnvSettingsSource, SettingsConfigDict
 
 
 class _CommaListMixin:
@@ -47,7 +48,9 @@ class Settings(BaseSettings):
         return user_id in self.admin_telegram_ids
 
     @classmethod
-    def settings_customise_sources(cls, settings_cls, init_settings, env_settings, dotenv_settings, file_secret_settings):
+    def settings_customise_sources(
+        cls, settings_cls, init_settings, env_settings, dotenv_settings, file_secret_settings
+    ):
         mc = settings_cls.model_config
         common = {
             "case_sensitive": mc.get("case_sensitive"),
@@ -60,7 +63,12 @@ class Settings(BaseSettings):
         return (
             init_settings,
             _CommaListEnvSource(settings_cls, **common),
-            _CommaListDotEnvSource(settings_cls, env_file=mc.get("env_file"), env_file_encoding=mc.get("env_file_encoding"), **common),
+            _CommaListDotEnvSource(
+                settings_cls,
+                env_file=mc.get("env_file"),
+                env_file_encoding=mc.get("env_file_encoding"),
+                **common,
+            ),
             file_secret_settings,
         )
 

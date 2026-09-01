@@ -2,11 +2,10 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
-import pytest
-
 from config import settings
-from duplicate_detection import detector, notifier as dd_notifier, repository as dd_repo
-
+from duplicate_detection import detector
+from duplicate_detection import notifier as dd_notifier
+from duplicate_detection import repository as dd_repo
 
 # ---------------------------------------------------------------------------
 # _snip

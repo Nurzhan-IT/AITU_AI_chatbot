@@ -29,7 +29,6 @@ import re
 import struct
 from collections import Counter
 from pathlib import Path
-from typing import Optional
 
 logger = logging.getLogger(__name__)
 

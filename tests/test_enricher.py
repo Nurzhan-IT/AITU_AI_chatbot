@@ -1,7 +1,5 @@
 import json
 
-import pytest
-
 from rag.dialog import enricher
 from rag.dialog.enricher import (
     _coerce_optional_str,

@@ -16,7 +16,7 @@ from typing import Optional, TypedDict
 
 from config import settings
 from rag.dialog.prompts import CLASSIFY_SYSTEM_PROMPT
-from rag.generator import _make_llm_client, _is_reasoning_model, supports_json_object, supports_json_schema
+from rag.generator import _make_llm_client, supports_json_object, supports_json_schema
 
 logger = logging.getLogger(__name__)
 

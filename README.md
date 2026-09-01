@@ -1,5 +1,9 @@
 # AITU Chatbot — RAG-бот для университета
 
+[![CI](https://github.com/12farit21/AITU_AI_chatbot/actions/workflows/ci.yml/badge.svg)](https://github.com/12farit21/AITU_AI_chatbot/actions/workflows/ci.yml)
+[![Publish](https://github.com/12farit21/AITU_AI_chatbot/actions/workflows/publish.yml/badge.svg)](https://github.com/12farit21/AITU_AI_chatbot/actions/workflows/publish.yml)
+[![Deploy](https://github.com/12farit21/AITU_AI_chatbot/actions/workflows/deploy.yml/badge.svg)](https://github.com/12farit21/AITU_AI_chatbot/actions/workflows/deploy.yml)
+
 Telegram-бот для консультаций студентов Astana IT University. Отвечает на вопросы по загруженным документам (PDF, DOCX) на русском, английском и казахском языках с указанием источников.
 
 Доступ только для студентов AITU — верификация через почту `@astanait.edu.kz`.

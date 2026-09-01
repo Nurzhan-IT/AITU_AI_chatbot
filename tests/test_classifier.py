@@ -3,7 +3,6 @@ from typing import Optional
 
 import pytest
 
-from config import settings
 from rag.dialog import classifier
 from rag.dialog.classifier import (
     _cache_get,

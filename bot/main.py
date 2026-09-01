@@ -1,6 +1,5 @@
 import asyncio
 import logging
-import time
 from datetime import datetime
 
 from aiogram import Bot, Dispatcher
@@ -8,10 +7,10 @@ from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.fsm.storage.memory import MemoryStorage
 
-from config import settings, TZ_UTC5
 from bot.auth.handler import router as auth_router
-from bot.handlers import admin, admin_faq, admin_ai_faq, dialog, user
+from bot.handlers import admin, admin_ai_faq, admin_faq, dialog, user
 from bot.handlers.feedback import router as feedback_router
+from config import TZ_UTC5, settings
 from rag.retriever import Retriever
 
 logger = logging.getLogger(__name__)

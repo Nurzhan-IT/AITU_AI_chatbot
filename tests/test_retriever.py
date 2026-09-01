@@ -6,8 +6,7 @@ from qdrant_client.models import Fusion, FusionQuery
 
 from config import settings
 from rag.bm25 import BM25Stats
-from rag.retriever import Retriever, _clamp01, _cosine, _compute_factors, mmr
-
+from rag.retriever import Retriever, _clamp01, _compute_factors, _cosine, mmr
 
 # ---------------------------------------------------------------------------
 # _clamp01()

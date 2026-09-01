@@ -2,17 +2,16 @@
 import asyncio
 import logging
 from pathlib import Path
-from typing import Optional
 
 from aiogram import Bot
 from groq import AsyncGroq
 from qdrant_client import AsyncQdrantClient
-from qdrant_client.models import Filter, FieldCondition, MatchValue
+from qdrant_client.models import FieldCondition, Filter, MatchValue
 
 from config import settings
-from ingestion.ingest import parse_pdf, build_fitz_page_map, chunk_by_sections
+from duplicate_detection import notifier, repository
+from ingestion.ingest import build_fitz_page_map, chunk_by_sections, parse_pdf
 from rag.embedder import Embedder
-from duplicate_detection import repository, notifier
 
 logger = logging.getLogger(__name__)
 

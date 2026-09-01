@@ -6,7 +6,6 @@ import pytest
 
 from rag.bm25 import BM25Stats, bm25_doc_vector, bm25_query_vector, term_hash, tokenize
 
-
 # ---------------------------------------------------------------------------
 # tokenize()
 # ---------------------------------------------------------------------------

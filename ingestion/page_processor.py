@@ -1,5 +1,4 @@
 import fitz
-import pymupdf4llm
 
 from config import settings
 from ingestion.page_classifier import PageType

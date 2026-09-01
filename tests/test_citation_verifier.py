@@ -1,4 +1,3 @@
-import pytest
 
 from rag.citation_verifier import verify_citations
 

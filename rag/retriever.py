@@ -21,7 +21,7 @@ from qdrant_client.models import (
     VectorParams,
 )
 
-from config import settings, TZ_UTC5
+from config import TZ_UTC5, settings
 from rag.embedder import Embedder
 
 logger = logging.getLogger(__name__)
@@ -251,6 +251,7 @@ class Retriever:
 
         if self._hybrid_active:
             from pathlib import Path as _Path
+
             from rag.bm25 import BM25Stats
             self._bm25_stats = BM25Stats.load(_Path(settings.bm25_stats_path))
             logger.info(
@@ -274,7 +275,8 @@ class Retriever:
         prefetch_limit = settings.top_k * 3
 
         if self._hybrid_active:
-            from rag.bm25 import tokenize as bm25_tokenize, bm25_query_vector
+            from rag.bm25 import bm25_query_vector
+            from rag.bm25 import tokenize as bm25_tokenize
             stats = self._bm25_stats
             q_tokens = bm25_tokenize(query)
             q_indices, q_values = bm25_query_vector(

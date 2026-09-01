@@ -38,7 +38,7 @@ def _merge_multipage_tables(pages: list[tuple[int, str]]) -> list[tuple[int, str
             continue
 
         # N+1 should not already have a separator near the start
-        if any(_is_separator(l) for l in lines_n1[:3]):
+        if any(_is_separator(ln) for ln in lines_n1[:3]):
             continue
 
         # Find the last separator in page N and the header row above it

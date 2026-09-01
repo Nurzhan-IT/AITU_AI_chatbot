@@ -386,18 +386,18 @@ async def _proceed_to_search(message: Message, state: FSMContext) -> None:
         return
 
     # Local imports to avoid an import-time cycle with bot.handlers.user
-    from bot.handlers.user import (
-        MAX_TG_LEN,
-        _NO_PREVIEW,
-        _format_answer,
-        _generator,
-        _retriever,
-        send_long_message,
-    )
     from bot.handlers.feedback import (
         clarification_feedback_keyboard,
         feedback_keyboard,
         log_query,
+    )
+    from bot.handlers.user import (
+        _NO_PREVIEW,
+        MAX_TG_LEN,
+        _format_answer,
+        _generator,
+        _retriever,
+        send_long_message,
     )
 
     status_msg = await message.answer("🔍 Ищу информацию...")

@@ -22,7 +22,7 @@ from bot.auth.repository import (
 )
 from bot.auth.states import EmailVerification
 from bot.keyboards.user import user_keyboard
-from config import settings, TZ_UTC5
+from config import TZ_UTC5, settings
 
 logger = logging.getLogger(__name__)
 router = Router()

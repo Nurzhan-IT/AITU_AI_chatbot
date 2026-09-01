@@ -135,7 +135,9 @@ async def enrich_and_profile(
         for a in filtered:
             q = (a.get("question") or "").strip()
             ans_text = str(a.get("answer")).strip()
-            lines.append(f'  {{"question": {json.dumps(q, ensure_ascii=False)}, "answer": {json.dumps(ans_text, ensure_ascii=False)}}}')
+            q_json = json.dumps(q, ensure_ascii=False)
+            ans_json = json.dumps(ans_text, ensure_ascii=False)
+            lines.append(f'  {{"question": {q_json}, "answer": {ans_json}}}')
         user_content = "\n".join(lines)
 
         client = _make_llm_client()

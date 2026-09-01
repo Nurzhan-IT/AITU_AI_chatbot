@@ -4,8 +4,8 @@ import pytest
 
 from config import settings
 from rag.generator import (
-    Generator,
     _PARTIAL_COHORT_NOTE,
+    Generator,
     _build_context,
     _deduplicate_sources,
     _make_llm_client,
@@ -15,7 +15,6 @@ from rag.generator import (
     supports_json_schema,
     verify_chunk_answers_query,
 )
-
 
 # ---------------------------------------------------------------------------
 # detect_language()
